@@ -1,92 +1,60 @@
-print('cross_trf')
-
 import pandas as pd
 import numpy as np
 from itertools import chain
-
-# OLS estimation
-# import patsy as pat
 from patsy import dmatrices
-# import statsmodels.api as sm
 from statsmodels.api import OLS
-
-# sklearn scalers
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, QuantileTransformer
-
-# import warnings
 from warnings import simplefilter
-
 from statsmodels.tools.sm_exceptions import ValueWarning
-simplefilter('ignore', ValueWarning)
-
 from pandas.errors import SettingWithCopyWarning
+
+# import h_block cross validation
+# import h_block_cv
+
+simplefilter('ignore', ValueWarning)
 simplefilter(action="ignore", category=SettingWithCopyWarning)
 
-
-
-
-# ctrf class
-#   normalization
-#   estimation : base
-#   find MRT: mim(mortality) temp
-#   estimation : cTRFs
-#   calculate h-block cv
-
-
-class CTRF :
-
-    def __init__(self, df=pd.DataFrame(), dep=str, temp_r=str, pq_order=dict(), covariates=dict(), t_inverval=1000, **kwargs):
+class CTRF:
+    def __init__(self, df: pd.DataFrame, dep: str, temp_r: str, pq_order: dict, covariates: dict, t_interval: int = 1000, **kwargs):
         """
         Initialize the Ctrf class.
+        
         Parameters:
-        df (pd.DataFrame): DataFrame containing dependent, temperature, covariates, and date variables.
-        y (str): Dependent variable.
-            e.g. 'mortality'
-        r (str): Temperature variable.
-            e.g. 'temperature' in Fahrenheit or Celsius
-        x (list): List of covariate variables.
-            e.g. {'time':'linear', 'income':'standard'}
-        date (str): Date variable.
-        order (dict): Order for temperature and covariates. Default is {'base': {'p': 4, 'q': 1}}.
-        n (int): Number of prediction points.
-        kwargs: Additional arguments.
+        - df (pd.DataFrame): DataFrame containing dependent, temperature, covariates, and date variables.
+        - dep (str): Dependent variable (e.g., 'mortality').
+        - temp_r (str): Temperature variable (e.g., 'temperature' in Fahrenheit or Celsius).
+        - pq_order (dict): Order for temperature and covariates. Default is {'base': {'p': 4, 'q': 1}}.
+        - covariates (dict): List of covariate variables with their scaling methods (e.g., {'time':'linear', 'income':'standard'}).
+        - t_interval (int): Number of prediction points.
+        - kwargs: Additional arguments.
         """
+        self.df = df.copy().reset_index(drop=True)
         self.y = dep
         self.r = temp_r
-        # all covariates in the 'order'
-        additional_covariates = list(covariates.keys())
-        # remove temp in the list
-        additional_covariates.remove(self.r)
-        self.x = additional_covariates.copy()
-        # 
-        self.df = df[[self.y]+[self.r]+self.x].copy().reset_index(drop=True)
-        # 
-        # self.date = date
-        # self.n = n
-        # save trf model (statsmodels)
-        self.trf = {}
-        # save ctrf model (statsmodels)
-        self.ctrf = {}
-        # 
-        # store scale information whild normalization.
         self.order = pq_order
         self.scaler = covariates.copy()
-        self.temp_s_interval = t_inverval
+        self.temp_s_interval = t_interval
+
+        additional_covariates = list(covariates.keys())
+        additional_covariates.remove(self.r)
+        self.x = additional_covariates.copy()
+        
+        self.df = self.df[[self.y] + [self.r] + self.x]
+        
+        self.trf = {}
+        self.ctrf = {}
         self.mmt_r = None
         self.mmt_s = None
-        # regression result
+        
         self.reg_res_trf = {}
         self.reg_res_ctrf = {}
-        # regression spec
         self.spec_trf = ''
         self.spec_ctrf = ''
-        # df for regression
         self.df_reg_trf = pd.DataFrame()
-        # self.df_temp_arry = pd.DataFrame({'place_holder': [1.0] * self.n})
         self.df_reg_ctrf = pd.DataFrame()
-        # df for recovering trf and ctrf
         self.df_pred_trf = pd.DataFrame()
         self.df_pred_ctrf = pd.DataFrame()
+
 
 
 
@@ -436,68 +404,8 @@ class CTRF :
 
 
 
-
-    def transform(self, type={'trf', 'ctrf'}, prediction=False, order=None):
-        if type == 'trf':
-            vars = [self.r]
-            if not order : order = self.order
-            # covariate = 1
-            # do powering
-            # df = self.normalizer(var= self.r, method=order[self.r]['scale'])
+    # def h_block_cv(self):
         
-        elif type == 'ctrf' :
-            vars = [self.r] + self.x
-            if not order : order = self.order
-            # for var in vars :
-            
-            #     df[:,f'{var}'] = self.normalizer(var=var, method=self.order[var]['scale'], mmt=self.mmt_r)
-
-        if not prediction :df = self.df[[self.y]].copy()
-        elif   prediction :df = pd.DataFrame()
-
-        for var in vars :
-            # 
-            temp_s = pd.DataFrame(self.normalizer(var= self.r, method=order[self.r]['scale']))
-            # print(temp_s)
-            if var == self.r : covariate = 1
-            else : covariate = self.normalizer(var=var, method=self.order[var]['scale'], mmt=self.mmt_r)
-            
-            # 
-            df_var = self.pq_powering(order[var]['p'], order[var]['q'], temp_s=temp_s, label=var, covariate_s=covariate)
-            df = pd.concat([df, df_var], axis=0, ignore_index=True)
-        return df, df_var
-
-
-
-
-
-         
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # #######################################
