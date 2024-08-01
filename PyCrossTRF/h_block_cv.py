@@ -15,7 +15,7 @@ class CV_h_block:
     Cross-validation using h-block method to report Prediction Error (PE) over different p and q orders.
     """
 
-    def __init__(self, df: pd.DataFrame, dep: str, indep: str, pq_order: dict):
+    def __init__(self, df: pd.DataFrame, dep: str, indep: str, pq_order: dict, cov_scale:dict = None):
         """
         Initialize the CV_h_block class with the dataset and parameters.
         
@@ -24,10 +24,20 @@ class CV_h_block:
         :param indep: Name of the independent variable.
         :param pq_order: Dictionary specifying the maximum order of p and q.
         """
-        self.df = df[[dep, indep]].copy().reset_index(drop=True)
-        self.dep = dep
-        self.indep = indep
+        # self.df = df[[dep, indep]].copy().reset_index(drop=True)
+        # self.dep = dep
+        # self.indep = indep
+        self.y : pd.Series = df[dep].copy()
+        self.r : pd.Series = df[indep].copy()
+
         self.pq_order = pq_order
+
+        if cov_scale is None : 
+            self.scale_method = 'minimax'
+        else :
+            self.scale_method = cov_scale[f'{indep}']['scale']
+        
+
         self.df_pq_powered = pd.DataFrame()
         self.pq_combination = []
         # 
@@ -36,27 +46,16 @@ class CV_h_block:
         self.mean_pe_lowest = float()
 
 
-    def gen_po_powered_df(self, verbose=False):
-        """
-        Generate the dataframe for OLS based on the maximum p and q order.
-        """
-        self.df_pq_powered = pd.concat([
-            self.df[[self.dep]],
-            ctrf_utils().pq_powering(temp_s=self.df[[self.indep]], pq_order=self.pq_order)
-        ], axis=1)
-        
-        if verbose: print(self.df_pq_powered)
-        
-        return self.df_pq_powered
 
 
-    def gen_pq_combination(self, verbose=False) -> list:
+    def gen_pq_combination(self, pq_order : dict = None, verbose=False) -> list:
         """
         Generate all possible combinations of p and q orders.
         """
+        if pq_order is None : pq_order = self.pq_order
         pq_combination = []
-        for q in range (1, self.pq_order['q']+1) :
-            for p in range(1, self.pq_order['p']+1) : 
+        for q in range (1, pq_order['q']+1) :
+            for p in range(1, pq_order['p']+1) : 
                 pq_combination += [{'p':p, 'q':q}]
 
         self.pq_combination = pq_combination
@@ -65,22 +64,26 @@ class CV_h_block:
         return self.pq_combination
 
 
-    def gen_regressor_lst(self, pq_order: dict, verbose=False) -> list:
+    def gen_regressor_lst(self, indep : str = None, pq_order: dict = None, verbose=False) -> list:
         """
         Generate the list of regressors for OLS based on p and q order.
         """
+        if indep is None : indep = self.r.name
+        if pq_order is None : pq_order = self.pq_order
         x_lst = ['Intercept']
         for p in range(1, pq_order['p']+1) : 
-            x_lst += [f'{self.indep}_{p}0']
+            x_lst += [f'{indep}_{p}0']
         
         for q in range (1, pq_order['q']+1) :
-            x_lst += [f'{self.indep}_0{q}c']
-            x_lst += [f'{self.indep}_0{q}s']
+            x_lst += [f'{indep}_0{q}c']
+            x_lst += [f'{indep}_0{q}s']
         
         if verbose: print(x_lst)
         
         return x_lst
     
+
+
 
     def gen_ij_selector(self, i: int, n: int, h: int, verbose=False) -> list:
         """
@@ -107,7 +110,9 @@ class CV_h_block:
         return lst_selector
     
 
-    def h_block_e_pe(self, ys:pd.DataFrame, xs:pd.DataFrame, crit_segment: int = 6, verbose=False) -> float:
+
+
+    def h_block_e_pe(self, ys:pd.Series, xs:pd.DataFrame, crit_segment: int = 6, verbose=False) -> float:
         """
         Calculate the average prediction error (PE) using the h-block cross-validation method.
         
@@ -132,12 +137,16 @@ class CV_h_block:
         return pe_mean
         
 
+
+
     def pick_lowest_pe(self, df_pe_res : pd.DataFrame, verbose=False) -> list :
         self.mean_pe_lowest = df_pe_res['CV'].min()
         self.pq_order_updated = df_pe_res.loc[df_pe_res['CV'] == self.mean_pe_lowest]['pq_order'].to_list()
         if verbose : print(self.pq_order_updated)
 
         return self.pq_order_updated
+
+
 
 
     def compute_cv(self, show_res=False,verbose=False) -> tuple:
@@ -147,24 +156,33 @@ class CV_h_block:
         :param verbose: Print detailed information if True.
         """
         pq_combination = self.gen_pq_combination(verbose=verbose)
-        df = self.gen_po_powered_df(verbose=verbose)
-        dep = self.dep
+        df = ctrf_utils().gen_df_xs(temp_s=
+                                            ctrf_utils().normalizer(x=self.r, 
+                                                            method=self.scale_method, 
+                                                            verbose=verbose
+                                                            ),
+                                    pq_order=self.pq_order,
+                                    verbose=verbose
+                                    )
+        # dep = self.r.name
         
         pe_res = []
         
         for pq_order in pq_combination:
-            ys = df[[dep]]
+            # ys = df[[dep]]
             xs = df[self.gen_regressor_lst(pq_order=pq_order, verbose=verbose)]
             # average prediction error of the give pq_order
-            pe_mean = self.h_block_e_pe(ys=ys, xs=xs, crit_segment=6, verbose=verbose)
+            pe_mean = self.h_block_e_pe(ys=self.y, xs=xs, crit_segment=6, verbose=verbose)
             pe_res.append([pq_order, pe_mean])
         
         self.df_pe_res = pd.DataFrame(pe_res, columns=['pq_order', 'CV'])
         self.pick_lowest_pe(df_pe_res= self.df_pe_res, verbose=verbose)
 
-        if verbose or show_res: print(self.df_pe_res)
+        if verbose or show_res: print(self.df_pe_res,'\n', self.pq_order_updated)
         
-        return self.pq_order_updated, self.mean_pe_lowest
+        return self.pq_order_updated[0], self.mean_pe_lowest
+
+
 
 
 

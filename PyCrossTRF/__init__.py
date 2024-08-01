@@ -10,4 +10,18 @@ reload(estimation_module)
 
 
 
+# # Estimation module - OLS with processed data
+cv_module = import_module('PyCrossTRF.PyCrossTRF.h_block_cv')
+from .h_block_cv import *
+reload(cv_module)
+
+
+
+
+# # Estimation module - OLS with processed data
+utilities_module = import_module('PyCrossTRF.PyCrossTRF.utils')
+from .utils import *
+reload(utilities_module)
+
+
 

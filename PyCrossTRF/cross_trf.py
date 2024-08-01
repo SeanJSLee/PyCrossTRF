@@ -160,7 +160,7 @@ class CTRF_recover :
 
 
 
-    def gen_pred_dict(  self, ctrf_pred_lst : list, s_pred : pd.Series, coef : pd.Series, pq_order : dict, verbose=False ):
+    def recover_ctrf(  self, ctrf_pred_lst : list, s_pred : pd.Series, coef : pd.Series, pq_order : dict, verbose=False ):
         '''
         generate list of dict that contatining information to recover CTRF
         ctrf_pred_lst = [{'time':[.5, 1.0]},{'income':[-1.0, 0.0, 3.0]},{'age':[-2.0, 1.0, 3.0]}]
