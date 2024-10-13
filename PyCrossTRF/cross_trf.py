@@ -136,7 +136,7 @@ class CTRF:
     def estimate_ctrf(self, verbose=False):
         # estimate trf first to find MMT.
         if self.MMT_s is None :
-            print('TRF re-estimate')
+            if verbose: print('TRF re-estimate')
             self.estimate_trf()
         
         self.pre_processing(prep_for='ctrf', verbose=verbose)
@@ -144,6 +144,9 @@ class CTRF:
         # run OLS
         # save ols result
         self.reg_res_ctrf = OLS(self.y, self.Xs_ctrf).fit()
+        # 
+        # update MMT in ctrf
+        # self.recovered_ctrf
 
         if verbose : print(self.reg_res_ctrf.summary(), '\n', self.reg_res_ctrf.params)
         #
