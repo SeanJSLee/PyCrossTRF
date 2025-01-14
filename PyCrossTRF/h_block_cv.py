@@ -6,6 +6,10 @@ from statsmodels.tools.sm_exceptions import ValueWarning
 from pandas.errors import SettingWithCopyWarning
 from .utils import ctrf_utils
 
+from joblib import Parallel, delayed
+import os
+import psutil
+
 # Suppress specific warnings
 simplefilter('ignore', ValueWarning)
 simplefilter(action="ignore", category=SettingWithCopyWarning)
@@ -112,9 +116,58 @@ class CV_h_block:
 
 
 
+    # def h_block_e_pe(self, ys:pd.Series, xs:pd.DataFrame, crit_segment: int = 6, verbose=False) -> float:
+    #     """
+    #     Calculate the average prediction error (PE) using the h-block cross-validation method.
+        
+    #     :param ys: Dependent variable data.
+    #     :param xs: Independent variable data.
+    #     :param crit_segment: Number of segments to determine block size h.
+    #     """
+    #     n = len(ys.index)
+    #     crit_h = np.ceil(n / crit_segment).astype(int)
+    #     pe_lst = []
+        
+    #     for i in range(0, n):
+    #         selector = self.gen_ij_selector(i=i, n=n, h=crit_h)
+    #         model = OLS(ys.iloc[selector], xs.iloc[selector]).fit()
+    #         pe = model.predict(xs.iloc[i]).iloc[0]
+    #         pe_lst.append(pe)
+        
+    #     pe_mean = np.mean(pe_lst)
+        
+    #     if verbose: print(pe_mean, pe_lst)
+        
+    #     return pe_mean
+
+    # def h_block_e_pe(self, ys:pd.Series, xs:pd.DataFrame, crit_segment: int = 6, verbose=False) -> float:
+    #     """
+    #     Calculate the average prediction error (PE) using the h-block cross-validation method with parallel computation.
+        
+    #     :param ys: Dependent variable data.
+    #     :param xs: Independent variable data.
+    #     :param crit_segment: Number of segments to determine block size h.
+    #     """
+    #     n = len(ys.index)
+    #     crit_h = np.ceil(n / crit_segment).astype(int)
+
+    #     def compute_pe(i):
+    #         selector = self.gen_ij_selector(i=i, n=n, h=crit_h)
+    #         model = OLS(ys.iloc[selector], xs.iloc[selector]).fit()
+    #         return model.predict(xs.iloc[i]).iloc[0]
+
+    #     pe_lst = Parallel(n_jobs=-1)(delayed(compute_pe)(i) for i in range(n))
+        
+    #     pe_mean = np.mean(pe_lst)
+        
+    #     if verbose: print(pe_mean, pe_lst)
+        
+    #     return pe_mean
+    
     def h_block_e_pe(self, ys:pd.Series, xs:pd.DataFrame, crit_segment: int = 6, verbose=False) -> float:
         """
-        Calculate the average prediction error (PE) using the h-block cross-validation method.
+        Calculate the average prediction error (PE) using the h-block cross-validation method with parallel computation.
+        Ensure that tasks are not allocated to Intel's 'E' cores.
         
         :param ys: Dependent variable data.
         :param xs: Independent variable data.
@@ -122,13 +175,22 @@ class CV_h_block:
         """
         n = len(ys.index)
         crit_h = np.ceil(n / crit_segment).astype(int)
-        pe_lst = []
-        
-        for i in range(0, n):
+
+        def compute_pe(i):
             selector = self.gen_ij_selector(i=i, n=n, h=crit_h)
             model = OLS(ys.iloc[selector], xs.iloc[selector]).fit()
-            pe = model.predict(xs.iloc[i]).iloc[0]
-            pe_lst.append(pe)
+            return model.predict(xs.iloc[i]).iloc[0]
+
+        # Set the environment variable to restrict joblib to use only P cores
+        original_affinity = psutil.Process().cpu_affinity()
+        p_cores = [core for core in original_affinity if core < 12]  # Assuming P-cores are even-numbered
+        psutil.Process().cpu_affinity(p_cores)
+
+        try:
+            pe_lst = Parallel(n_jobs=len(p_cores))(delayed(compute_pe)(i) for i in range(n))
+        finally:
+            # Restore the original CPU affinity
+            psutil.Process().cpu_affinity(original_affinity)
         
         pe_mean = np.mean(pe_lst)
         

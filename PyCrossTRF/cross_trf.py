@@ -16,7 +16,15 @@ simplefilter('ignore', ValueWarning)
 simplefilter(action="ignore", category=SettingWithCopyWarning)
 
 class CTRF:
-    def __init__(self, df: pd.DataFrame, dep: str, temp_r: str, pq_order: dict, cov_scale: dict, std_interval: int = 1000):
+    def __init__(self, df: pd.DataFrame, 
+                 dep: str, 
+                 temp_r: str, 
+                 pq_order: dict, 
+                 cov_scale: dict, 
+                 std_interval: int = 1000,
+                 var_date = 'date',
+                 var_id = 'fips'
+                 ):
         """
         Initialize the Ctrf class.
         
@@ -34,6 +42,8 @@ class CTRF:
         self.x_raw  = {}
         for cov_x in [cov for cov in cov_scale.keys() if cov != self.r.name] :
             self.x_raw[f'{cov_x}'] = df[cov_x].copy()
+        self.var_date = var_date        # date variable
+        self.var_id = var_id            # id variable (cross sectional id)
 
         self.pq_order = pq_order
         self.cov_scale = cov_scale
@@ -47,6 +57,9 @@ class CTRF:
         self.Xs = pd.DataFrame()            # p,q powered temp
         self.Xs_ctrf = pd.DataFrame()       # p,q powered temp and covariates
         
+        # date
+        self.X_date = pd.DataFrame()
+        
         self.mmt_r : float = None           
         self.MMT_s : float = None                   # MMT in the way of normlized as normalization method.
         
@@ -58,7 +71,7 @@ class CTRF:
         self.normlized_vars = {}
         
         self.recovered_trf = pd.DataFrame()
-        self.recovered_ctrf = {}
+        self.recovered_ctrf = pd.DataFrame()
 
 
 
@@ -146,7 +159,14 @@ class CTRF:
         self.reg_res_ctrf = OLS(self.y, self.Xs_ctrf).fit()
         # 
         # update MMT in ctrf
+        self.recovered_ctrf = CTRF_recover().recover_ctrf(ctrf_pred_lst=[],
+                                    s_pred=self.s_pred,
+                                    coef=self.reg_res_ctrf.params,
+                                    pq_order=self.pq_order,
+                                    verbose=False)
+        # print(self.recovered_ctrf)
         # self.recovered_ctrf
+        self.MMT_s = np.argmin(self.recovered_ctrf['base']) / self.std_interval
 
         if verbose : print(self.reg_res_ctrf.summary(), '\n', self.reg_res_ctrf.params)
         #

@@ -8,6 +8,9 @@ from warnings import simplefilter
 from statsmodels.tools.sm_exceptions import ValueWarning
 from pandas.errors import SettingWithCopyWarning
 
+from statsmodels.tsa.seasonal import seasonal_decompose
+
+
 # import h_block cross validation
 # import h_block_cv
 
@@ -89,11 +92,11 @@ class ctrf_utils:
         # if MMT is None :
         # scikit-lean 'minmax_scale' based code. Transform X var to unit inverval.
         if method == 'minmax':
-            print('Minmax normalization')
             # xs = ( df[var] - df[var].min() ) / (df[var].max() - df[var].min())
             scaler = MinMaxScaler()
             xs = scaler.fit_transform(pd.DataFrame(x))
             if verbose :
+                print('Minmax normalization')
                 print(f'min: {scaler.data_min_.mean():2f}, max: {scaler.data_max_.mean():2f}')
                 
 
@@ -112,10 +115,10 @@ class ctrf_utils:
 
         elif method == 'time':
             # use index
-            print('time w/o MMT')
             scaler = len(x.index)
             xs = x.index / scaler
             if verbose :
+                print('time w/o MMT')
                 print(f'min: {x.min()}, max: {x.max()}')
 
         # ordinary standardization
@@ -129,7 +132,7 @@ class ctrf_utils:
 
             # When MMT is provided, standardize while centering at MMT.
             elif MMT is not None :
-                print(f'{x.name}Standardize centering at MMT - set sample mean of X as X value at the MMT')
+                if verbose: print(f'{x.name}Standardize centering at MMT - set sample mean of X as X value at the MMT')
                 # slice interval near the MMT, find closest two temp's location
                 # temp_minimax = df.loc[df[temp] >= MMT][temp].min()
                 temp_minimax = temp[temp >= MMT].min()
@@ -159,11 +162,11 @@ class ctrf_utils:
 
 
         elif method == 'quantile' :
-            print('quantile')
             # quantile transformer
             scaler = QuantileTransformer(n_quantiles=100)
             xs = scaler.fit_transform(df[[var]])
             if verbose :
+                print('quantile')
                 print(scaler.n_quantiles_)
                 print(scaler.quantiles_)
                 # print(qt.references_)
@@ -172,3 +175,73 @@ class ctrf_utils:
         xs = np.array(xs).flatten()
         xs = pd.Series(xs, name=x.name)
         return  xs
+    
+
+
+class Detrending:
+    def __init__(
+                self, 
+                df=pd.DataFrame,
+                dt_var = 'daily_death100k',
+                id  = 'fips',
+                name_date = 'date',
+                model:{'additive','multiplicative'}='multiplicative',
+                period:int = 12,
+                two_sided=False
+                ) :
+        # 
+        self.df = df
+        self.dt_var  = dt_var
+        self.id = id
+        self.name_date = name_date
+        self.model = model
+        self.period = period 
+        self.two_sided = two_sided
+        # 
+    
+
+    def estm(self, df = None) :
+        if df is None :
+            df = self.df[self.dt_var]
+        # else :
+        #     df = df[self.dt_var]
+        # ['trend', 'seasonal','resid']
+        decomp = seasonal_decompose(df,
+                                    model=self.model,
+                                    period=self.period,
+                                    two_sided=self.two_sided
+                                    )
+        # 
+        res = {}
+        res['trend']    = decomp.trend
+        res['seasonal'] = decomp.seasonal
+        res['resid']    = decomp.resid
+        # 
+        return res['trend'], res['seasonal'], res['resid']
+    
+    
+    def df_detreding(self) : 
+        df = self.df
+        id = self.id
+        df_agg = pd.DataFrame()
+        for _ in df[id].unique() :
+            df_i = df.loc[df[id] == _][[id,self.name_date,self.dt_var]].copy()
+            df_i = df_i.sort_values(by=self.name_date).reset_index(drop=True)
+            try :
+                (df_i[f'{self.dt_var}_trend'], 
+                    df_i[f'{self.dt_var}_seasonal'], 
+                    df_i[f'{self.dt_var}_resid']) = self.estm(df_i[self.dt_var])
+            except :
+                continue
+            df_agg = pd.concat([df_agg, df_i
+                                # pd.concat([ df_i,
+                                #             df_i[f'{self.dt_var}_trend'],
+                                #             df_i[f'{self.dt_var}_seasonal'],
+                                #             df_i[f'{self.dt_var}_resid']],
+                                #             axis=1)
+                                ], axis=0)
+
+        # return pd.concat([self.df[[self.id, self.name_date]],
+        #                   df_agg.drop(columns=[self.dt_var], errors='ignore')],
+        #                   axis=1)
+        return df_agg.drop(columns=[self.dt_var], errors='ignore')
