@@ -22,8 +22,8 @@ class CTRF:
                  pq_order: dict, 
                  cov_scale: dict, 
                  std_interval: int = 1000,
-                 var_date = 'date',
-                 var_id = 'fips'
+                 time_id = 'date',
+                 cross_id = 'fips'
                  ):
         """
         Initialize the Ctrf class.
@@ -42,8 +42,8 @@ class CTRF:
         self.x_raw  = {}
         for cov_x in [cov for cov in cov_scale.keys() if cov != self.r.name] :
             self.x_raw[f'{cov_x}'] = df[cov_x].copy()
-        self.var_date = var_date        # date variable
-        self.var_id = var_id            # id variable (cross sectional id)
+        self.time_id= time_id        # date variable
+        self.cross_id = cross_id            # id variable (cross sectional id)
 
         self.pq_order = pq_order
         self.cov_scale = cov_scale

@@ -1,16 +1,11 @@
-import os, pickle, warnings
+import warnings
 import pandas as pd
 import numpy as np
-
 from patsy import dmatrices
 from statsmodels.api import OLS
-
 from sklearn.preprocessing import QuantileTransformer
-
 from joblib import Parallel, delayed
-
-
-
+import torch
 
 warnings.filterwarnings(action='ignore',category=UserWarning)
 
@@ -24,7 +19,10 @@ class SieveBootstrap:
     def __init__(self,  CTRF = None, 
                         df_reg = pd.DataFrame(), 
                         ctrf:str = 'base',
-                        B:int=999, 
+                        B:int=999,
+                        maxL:int = 24,
+                        device='cuda',
+                        multiprocessing : {None, 'cpu', 'gpu'} = None,
                         ):
         """
         Initialize the SieveBootstrap class.
@@ -32,12 +30,12 @@ class SieveBootstrap:
             CTRF: CTRF model object from CTRF class.
         """
         self.df_reg     = df_reg
-        self.CTRF       = CTRF               # CTRF model object from CTRF class
-        self.ctrf       = ctrf               # CTRF model name
-        self.B          = B                  # number of bootstrap samples
+        self.CTRF       = CTRF              # CTRF model object from CTRF class
+        self.ctrf       = ctrf              # CTRF model name
+        self.B          = B                 # number of bootstrap samples
         # 
-        self.maxL   = 24                # maximum lag for AR process
-        self.maxT   = 0                 # maximum time point initialization
+        self.maxL   = maxL                  # maximum lag for AR process
+        self.maxT   = 0                     # maximum time point initialization
         self.lscross_ids = df_reg[self.CTRF.var_id].unique() # list of cross-sectional id
 
         # regression results - TRF or CTRF
@@ -49,10 +47,10 @@ class SieveBootstrap:
             self.CTRF_reg_res = CTRF.reg_res_ctrf
             self.CTRF_df_Xs      = CTRF.Xs_ctrf.copy()
         # 
-        # assign T
+        # assign time index
         self._assign_time_index()
         self.maxT = self.df_reg['T'].max()  # maximum time point update
-        # generate y_hat
+        # generate y_hat 
         self.df_reg['y_hat'] = self.CTRF_reg_res.predict()
         # generate fitted resiual of the CTRF model (eta_hat).
         self.df_reg['eta_hat'] = self.CTRF_reg_res.resid
@@ -64,10 +62,15 @@ class SieveBootstrap:
         self.df_e_hat = {}
         self.B_df_y_star = {}
         self.AR_model_results = {}
+        # 
+        self.device = device
+        self.muliprocessing = multiprocessing
 
-
+    #######################################################################################
     # main process.
-    def sieve_bootstrap_i(self, cross_id:str, save_results:bool = False):
+    #######################################################################################
+    def sieve_bootstrap_i(self, cross_id:str, 
+                          save_results_e_hat:bool = False, ):
         '''
         1. get the fitted residuals of CTRF model (eta_hat)
         2. run AR LS
@@ -89,34 +92,147 @@ class SieveBootstrap:
         # 2. run AR OLS
         df_e_hat_i, AR_result_i = self.run_AR_model(dfi, self.dependent_var, self.maxL)
         #       save results
-        if save_results:
+        if save_results_e_hat:
             self.df_e_hat[cross_id] = df_e_hat_i
             self.AR_model_results[cross_id] = AR_result_i
 
-        # 3. bootstrapping e_star
-        df_y_star_B = {}
-        df_y_star_B[0] = dfi[['T',self.dependent_var]].rename(columns={self.dependent_var:'y_star_0'})
-        df_y_star_B[0] = (df_y_star_B[0].sort_values(by='T', ascending=False)
-                                        .reset_index(drop=True)
-                                        .drop(columns=['T']))
-        #       loop over B times, b=0 means actual y.
-        for b in range(1, self.B + 1):
-            df_y_star_B[b] = self.bootstrap_iteration(dfi, df_e_hat_i, AR_result_i, cross_id).rename(columns={'y_star':f'y_star_{b}'})
-        #       concatenate y_star_b for B+1 times (1000 times).
-        df_y_star_B = pd.concat([df_y_star_B[b] for b in range(0, self.B + 1)], axis=1)
-        df_y_star_B = df_y_star_B.dropna()
-        #       save results
-        self.B_df_y_star[cross_id] = df_y_star_B
-        # print(df_y_star_B)
 
-        # 4. find the 2.5 and 97.5 percentiles of 999 y_star and 1 y_actual.
+        # 3. bootstrapping e_star
+        if self.muliprocessing == 'gpu' :
+            # drop consumed lags by AR model.
+            dfi = dfi.loc[dfi['T'] >= self.maxL]
+            df_y_star_B = self.bootstrap_e_star_torch_gpu(dfi, df_e_hat_i, cross_id)
+        else :
+            # initialize bootstrapped results.
+            df_y_star_B = {}
+            # 'y_star_0' reserved for the actual y.
+            df_y_star_B[0] = dfi[['T',self.dependent_var]].rename(columns={self.dependent_var:'y_star_0'})
+            df_y_star_B[0] = (df_y_star_B[0].sort_values(by='T', ascending=False)
+                                            .reset_index(drop=True)
+                                            .drop(columns=['T']))
+            #       loop over B times, b=0 means actual y.
+            # CPU multiprocessing
+            if self.muliprocessing == 'cpu' :
+                # b=1,...,B: Compute bootstrap iterations in parallel.
+                bootstrap_results = Parallel(n_jobs=-1)(
+                    delayed(self.bootstrap_iteration)(dfi, df_e_hat_i, AR_result_i, cross_id)
+                    for b in range(1, self.B + 1)
+                )
+                # Rename columns for each bootstrap result and store in the dictionary.
+                for b, df_result in enumerate(bootstrap_results, start=1):
+                    df_y_star_B[b] = df_result.rename(columns={'y_star': f'y_star_{b}'})
+    
+            # No multiprocessing
+            else :
+                for b in range(1, self.B + 1):
+                    df_y_star_B[b] = (self.bootstrap_iteration(dfi, 
+                                                            df_e_hat_i, 
+                                                            AR_result_i, 
+                                                            cross_id,)
+                                            .rename(columns={'y_star':f'y_star_{b}'}))
+            # concatenate y_star_b for B+1 times (1000 times).
+            df_y_star_B = pd.concat([df_y_star_B[b] for b in range(0, self.B + 1)], axis=1)
+            df_y_star_B = df_y_star_B.dropna(axis=0)
+            # save results
+            self.B_df_y_star[cross_id] = df_y_star_B
+
+
+        # 4. find the 2.5 and 97.5 percentiles of B y_star and 1 y_actual.
         df_bs_result = dfi[[self.date_col, self.cross_id_col, self.dependent_var,'y_hat','T']]
-        for idx in df_y_star_B.index:
-            tau025, tau975 = self.find_bootstrap_tails(idx, df_y_star_B)
-            df_bs_result.loc[idx, 'y_star_tau025'] = tau025
-            df_bs_result.loc[idx, 'y_star_tau975'] = tau975
+        if self.muliprocessing == 'gpu':
+            # Vectorized computation of quantiles for all rows
+            tau025_all, tau975_all = self.find_bootstrap_tails_torch_gpu(df_y_star_B)
+            # Align df_bs_result to the index of df_y_star_B (since dropna() may have reduced the number of rows)
+            df_bs_result = df_bs_result.loc[df_y_star_B.index].copy()
+            # Now assign the quantile arrays
+            df_bs_result['y_star_tau025'] = tau025_all
+            df_bs_result['y_star_tau975'] = tau975_all
+        else :
+            for idx in df_y_star_B.index:
+                tau025, tau975 = self.find_bootstrap_tails(idx, df_y_star_B)
+                df_bs_result.loc[idx, 'y_star_tau025'] = tau025
+                df_bs_result.loc[idx, 'y_star_tau975'] = tau975
+
         df_bs_result = df_bs_result.dropna(axis=0)
         return df_bs_result
+    #######################################################################################
+
+
+
+    #######################################################################################
+    # Subpprocesses
+    #######################################################################################
+    # 2. AR model
+    def run_AR_model(self, df, depvar:str, maxL:int):
+        # no constant model because 'eta_hat' will be feed in as demeaned.
+        ARspec = f'{depvar} ~ ' + ' + '.join([f'L{lags}' for lags in range(1, maxL + 1)]) + ' - 1'
+        # transform the dataframe to wide style for AR model.
+        df_wide = self._transform_to_wide(df, var_to_tr=depvar)
+        y, X = dmatrices(ARspec, df_wide, return_type='dataframe')
+        AR_result = OLS(y, X).fit()
+        df_e_hat = pd.DataFrame(AR_result.resid, columns=['e_hat'])
+        return df_e_hat, AR_result
+
+
+
+    # 3 bootstrapping sub process
+    def bootstrap_e_star_torch_gpu(self, dfi, df_e_hat_i, cross_id):
+        """
+        Vectorized version of the bootstrap iterations using the GPU.
+            y_star = y_hat + bootstrapped_residuals
+        where bootstrapped_residuals are computed by randomly permuting the fitted residuals.
+        This function returns a DataFrame with shape (n, B) where n is the number of time points.
+        """
+        device = self.device
+        B = self.B
+        maxL = self.maxL
+        # Convert the fitted residuals to a GPU tensor.
+        # (df_e_hat_i is assumed to be a DataFrame with a column 'e_hat'.)
+        e_hat = torch.tensor(df_e_hat_i['e_hat'].values, dtype=torch.float32, device=device)
+        n = e_hat.shape[0]
+
+        # Create a batch of B random permutations.
+        # Generate a (B, n) tensor of random values and compute argsort along dim=1.
+        rand_vals = torch.rand(B, n, device=device)
+        perm_indices = torch.argsort(rand_vals, dim=1)
+        # Expand e_hat to shape (B, n) and gather the bootstrapped residuals.
+        e_hat_expanded = e_hat.unsqueeze(0).expand(B, n)
+        e_star_batch = torch.gather(e_hat_expanded, 1, perm_indices)
+        
+        # # Create the time index values (if needed) – note: here we mimic your T-values.
+        # T_values = torch.arange(n, device=device, dtype=torch.int32).flip(0) + maxL
+
+        # Convert y_hat to GPU tensor.
+        y_hat = torch.tensor(dfi['y_hat'].values, dtype=torch.float32, device=device)
+        # Expand y_hat to shape (B, n)
+        y_hat_expanded = y_hat.unsqueeze(0).expand(B, n)
+        
+        # Compute bootstrapped y_star replicates (for the simplified model).
+        y_star_batch = y_hat_expanded + e_star_batch
+        # Optionally, if you need to run an AR simulation loop, you would need to recast that loop 
+        # into vectorized PyTorch code here.
+
+        # Move the results back to CPU as a NumPy array.
+        y_star_np = y_star_batch.cpu().numpy()
+        
+        # Create a DataFrame: each column corresponds to one bootstrap replicate.
+        df_y_star_B = pd.DataFrame(y_star_np.T, columns=[f'y_star_{b}' for b in range(1, B + 1)])
+        # If you need to include the actual (observed) y (i.e. b=0), add that column:
+        df_actual = dfi[['T', self.dependent_var]].rename(columns={self.dependent_var: 'y_star_0'})
+        df_actual = (df_actual.sort_values(by='T', ascending=False)
+                                .reset_index(drop=True)
+                                .drop(columns=['T']))
+        df_y_star_B.insert(0, 'y_star_0', df_actual['y_star_0'])
+        
+        # Remove any rows that might contain NaN (if needed).
+        df_y_star_B = df_y_star_B.dropna(axis=0)
+        
+        # Optionally, save the results.
+        self.B_df_y_star[cross_id] = df_y_star_B
+        
+        return df_y_star_B
+
+
 
 
 
@@ -129,6 +245,17 @@ class SieveBootstrap:
         df_y_star_ib = self.generate_y_star_b(df_eta_star_ib, cross_id)[['y_star']]   
         return df_y_star_ib
 
+
+    def bootstrapping_e_star(self, df_e_hat):
+        maxL = self.maxL
+        rndgen = np.random.default_rng(seed=None)
+        # pick without replacement.
+        rnd_idx = rndgen.choice(df_e_hat.index, size=df_e_hat.__len__())
+        df_e_star = df_e_hat.loc[rnd_idx].copy().reset_index()
+        df_e_star['e_star'] = df_e_star['e_hat']
+        df_e_star['T'] = df_e_star.index[::-1] + maxL
+        return df_e_star[['e_star','T']]
+    
 
 
     #  a dataframe that initializaztion and addition "eta_star" for AR process.
@@ -188,36 +315,67 @@ class SieveBootstrap:
         return _df
 
 
-    def run_AR_model(self, df, depvar:str, maxL:int):
-        # no constant model because 'eta_hat' will be feed in as demeaned.
-        ARspec = f'{depvar} ~ ' + ' + '.join([f'L{lags}' for lags in range(1, maxL + 1)]) + ' - 1'
-        # transform the dataframe to wide style for AR model.
-        df_wide = self._transform_to_wide(df, var_to_tr=depvar)
-        y, X = dmatrices(ARspec, df_wide, return_type='dataframe')
-        AR_result = OLS(y, X).fit()
-        df_e_hat = pd.DataFrame(AR_result.resid, columns=['e_hat'])
-        return df_e_hat, AR_result
 
-    def bootstrapping_e_star(self, df_e_hat):
-        maxL = self.maxL
-        rndgen = np.random.default_rng(seed=None)
-        # pick without replacement.
-        rnd_idx = rndgen.choice(df_e_hat.index, size=df_e_hat.__len__())
-        df_e_star = df_e_hat.loc[rnd_idx].copy().reset_index()
-        df_e_star['e_star'] = df_e_star['e_hat']
-        df_e_star['T'] = df_e_star.index[::-1] + maxL
-        return df_e_star[['e_star','T']]
 
-    def find_bootstrap_tails(self, idx, df_y_star_B):
+
+    
+    # 4. caluclate quantiles.
+
+    def find_bootstrap_tails(self, idx, df_y_star_B):            
         # find the 2.5 and 97.5 percentiles of 999 y_star and 1 y_actual.
-        quantile_transform = QuantileTransformer()
         bootstrapped_y_star_at_T = np.array(df_y_star_B.loc[idx]).reshape(-1,1)
+        quantile_transform = QuantileTransformer()
         quantile_transform.fit(bootstrapped_y_star_at_T)
-        
+        # Compute the 2.5th and 97.5th percentiles
         tau025 = quantile_transform.inverse_transform(np.array([[0.025]]))[0][0]
         tau975 = quantile_transform.inverse_transform(np.array([[0.975]]))[0][0]
+        # 
+        return tau025, tau975
+
+
+
+    def find_bootstrap_tails_torch_gpu(self, df_y_star_B):
+        """
+        Compute the 2.5th and 97.5th percentiles for each row of df_y_star_B.
+
+        Parameters:
+        df_y_star_B : pandas.DataFrame
+            DataFrame where rows correspond to a given index (e.g., time point)
+            and columns to different bootstrap replicates.
+        use_gpu : bool
+            Whether to use the GPU via PyTorch.
+        device : str
+            Device to use if use_gpu is True (e.g., 'cuda').
+
+        Returns:
+        tau025, tau975 : np.ndarray
+            Arrays of quantile values for each row.
+        """
+        # Convert the entire DataFrame to a tensor
+        tensor_y = torch.tensor(df_y_star_B.values, dtype=torch.float32)
+        tensor_y = tensor_y.to(self.device)
+
+        # Compute quantiles along the column dimension (dim=1)
+        tau025 = torch.quantile(tensor_y, 0.025, dim=1)
+        tau975 = torch.quantile(tensor_y, 0.975, dim=1)
+
+        # Move results back to CPU and convert to NumPy arrays
+        tau025 = tau025.cpu().numpy()
+        tau975 = tau975.cpu().numpy()
 
         return tau025, tau975
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -227,7 +385,7 @@ class SieveBootstrap:
     def _assign_time_index(self):
         df_T = self.df_reg[['date']].drop_duplicates().copy()
         df_T['T'] = (df_T['date'].rank() -1).astype(int)
-        self.df_reg['T'] = self.df_reg.merge(df_T, on='date', how='left')['T'] 
+        self.df_reg['T'] = self.df_reg.drop(columns='T', errors='ignore').merge(df_T, on='date', how='left')['T'] 
 
 
     
@@ -262,3 +420,8 @@ class SieveBootstrap:
             else:
                 df_wide_style = pd.concat([df_wide_style, _df_t], axis=0)
         return df_wide_style
+
+
+
+
+

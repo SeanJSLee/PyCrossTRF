@@ -5,7 +5,6 @@ from warnings import simplefilter
 from statsmodels.tools.sm_exceptions import ValueWarning
 from pandas.errors import SettingWithCopyWarning
 from .utils import ctrf_utils
-from .cross_trf import CTRF
 
 from joblib import Parallel, delayed
 import psutil
@@ -27,16 +26,7 @@ class CV_h_block:
     """
     Cross-validation using h-block method to report Prediction Error (PE) over different p and q orders.
     """
-    def __init__(self, 
-                    df: pd.DataFrame,                  
-                    dep: str, 
-                    temp_r: str, 
-                    pq_order_max: dict, 
-                    time_id:str = '', 
-                    cross_id:str= '', 
-                    cov_scale:dict = {},
-                    ctrf_model = None,
-                    ):
+    def __init__(self, df: pd.DataFrame, dep: str, indep: str, pq_order: dict, time_id:str = None, cross_id:str=None, cov_scale:dict = None):
         """
         Initialize the CV_h_block class with the dataset and parameters.
         
@@ -46,39 +36,25 @@ class CV_h_block:
         :param pq_order: Dictionary specifying the maximum order of p and q.
         """
         self.time_id = time_id
-        if time_id == '' :
+        if time_id is None :
             df[time_id] = df.index
-        if cross_id == '' :
+        if cross_id is None :
             df[cross_id] = '00000'
         # sort
         df = df.sort_values(by=[time_id, cross_id]).reset_index(drop=True).copy()
         df['i'] = df.index
-        # grouped time_id index values.
+        # 
         self.df_grouped_index_block = df.groupby(time_id, as_index=False).agg(i = ('i', list))
         # 
+        self.y : pd.Series = df[dep]
+        self.r : pd.Series = df[indep]
 
-        self.y : pd.Series  = df[dep].copy()            # pd.Series
-        self.r : pd.Series  = df[temp_r].copy()         #   same
+        self.pq_order = pq_order
 
-        # covariates, prepare to normalize.
-        self.x_raw  = {}
-        for cov_x in [cov for cov in cov_scale.keys() if cov != self.r.name] :
-            self.x_raw[f'{cov_x}'] = df[cov_x].copy()
-
-        self.time_id= time_id               # date variable
-        self.cross_id = cross_id            # id variable (cross sectional id)
-
-        self.pq_order_max = pq_order_max
-
-        self.cov_scale = cov_scale
-
-        self.s = pd.Series()                # normalizaed temperature
-        self.s_pred = pd.Series()           # temp range to recover TRF and CTRFs
-        self.x_s = {}
-
-        self.Xs = pd.DataFrame()            # p,q powered temp
-        self.Xs_ctrf = pd.DataFrame()       # p,q powered temp and covariates
-
+        if cov_scale is None : 
+            self.scale_method = 'minimax'
+        else :
+            self.scale_method = cov_scale[f'{indep}']['scale']
         
         self.df_pq_powered = pd.DataFrame()
         self.pq_combination = []
@@ -86,42 +62,7 @@ class CV_h_block:
         self.df_pe_res = pd.DataFrame()
         self.pq_order_updated = []
         self.mean_pe_lowest = float()
-        # 
-        # self.s = ctrf_model.s,
-        self.MMT_s = ctrf_model.MMT_s
 
-
-    def pre_processing(self, pq_order:dict, prep_for:str = 'ctrf'):
-        if prep_for == 'trf':
-            # estimation variable, normalization etc.
-            self.s = ctrf_utils().normalizer(x = self.r, 
-                                             method = self.cov_scale[self.r.name]['scale'])
-            self.Xs = ctrf_utils().gen_df_xs(temp_s=self.s, pq_order=pq_order)
-            return self.Xs
-
-        elif prep_for == 'ctrf':
-            # construct ctrf dataframe
-            self.Xs_ctrf = self.Xs
-            # adding normalizaed variable for ctrf
-            for cov_x in self.x_raw.keys() :
-                # normalization
-                self.x_s[f'{cov_x}'] = ctrf_utils().normalizer(
-                                                    x=self.x_raw[cov_x], 
-                                                    method=self.cov_scale[cov_x]['scale'],
-                                                    temp= self.s,
-                                                    MMT=self.MMT_s
-                                                )
-                # gen variable with the pq powered the temp var.
-                self.Xs_ctrf = pd.concat([  self.Xs_ctrf,
-                                            ctrf_utils().pq_powering(   
-                                                temp_s= self.s, 
-                                                pq_order= pq_order, 
-                                                covariate_s= self.x_s[f'{cov_x}']
-                                            )
-                                            ], axis=1
-                                        )
-            return self.Xs_ctrf
-        
 
 
     def  compute_prediction_error(self, pq_order = {'p':4, 'q':1}, verbose=False) :
@@ -134,9 +75,9 @@ class CV_h_block:
             grouping same i and j for a panel.
         '''
         # normalized dataframe Xs, using ctrf.utils
-        Xs = self.pre_processing(pq_order= pq_order, prep_for = 'trf')
-        if self.x_raw is not None:
-            Xs = pd.concat([Xs,self.pre_processing(pq_order= pq_order, prep_for = 'ctrf') ], axis=1)
+        s = ctrf_utils().normalizer(x = self.r, method = 'minmax')
+        Xs = ctrf_utils().gen_df_xs(temp_s=s, pq_order = pq_order)
+        # print(Xs)
 
         # i over the time index - the index of the df_grouped_index_block.
         n = self.df_grouped_index_block.index.max()
@@ -148,14 +89,13 @@ class CV_h_block:
               'selector' slicing blocks.
             '''
             selector_i = self.df_grouped_index_block.loc[i]['i']
-            j = self.gen_ij_selector(
+            selector_j = self.gen_ij_selector(
                                 i = i, 
                                 n = n, 
                                 h = 6  # 'h' is the critical valaue proposed by burman et al. 
                                 )
-            selector_j = self.df_grouped_index_block.loc[j].explode('i')['i'].to_list()
             model = OLS(self.y.iloc[selector_j], Xs.iloc[selector_j]).fit()
-            # print(model.params)
+            print(model.params)
             df_predicted_i = pd.DataFrame(model.predict(Xs.iloc[selector_i]), columns=['Xs_hat'])
             
             df_predicted_i['y'] = self.y.iloc[selector_i]
@@ -175,7 +115,7 @@ class CV_h_block:
         """
         Generate all possible combinations of p and q orders.
         """
-        if pq_order is None : pq_order = self.pq_order_max
+        if pq_order is None : pq_order = self.pq_order
         pq_combination = []
         for q in range (1, pq_order['q']+1) :
             for p in range(1, pq_order['p']+1) : 
@@ -213,7 +153,72 @@ class CV_h_block:
         if verbose: print(i, lst_selector)
         # 
         return lst_selector
+        
+        # a panel data, groupping cross sectional data by time series id.
+        #   probably padded by number of groups in index.
+        # else :
+
     
+
+    # # mapping i, j to date value.
+    # def mapping_ij_to_date(self, lst_selector:list) -> list:
+    #     if self.date_var is None : 
+    #         return lst_selector # return in index values so that '.iloc' can be used.
+        
+    #     else :
+    #         # mapping date to index, return index values so that '.iloc' can be used.
+    #         # mapping 0,..,i...,n to date values.
+    #         df_mapping_date_i = (self.df_date.drop_duplicates().reset_index(drop=True)
+    #                                 .reset_index()
+    #                                 )
+            
+    #         self.df_date['i'] = self.df_date.index
+             
+
+
+    
+    # def h_block_e_pe(self, ys:pd.Series, xs:pd.DataFrame, crit_segment: int = 6, verbose=False) -> float:
+    #     """
+    #     Calculate the average prediction error (PE) using the h-block cross-validation method with parallel computation.
+    #     Ensure that tasks are not allocated to Intel's 'E' cores.
+        
+    #     :param ys: Dependent variable data.
+    #     :param xs: Independent variable data.
+    #     :param crit_segment: Number of segments to determine block size h.
+    #     """
+    #     if self.date_var is None :
+    #         n = ys.index
+    #     else :
+    #         n = 1
+    #     crit_h = np.ceil(n / crit_segment).astype(int)
+
+    #     def compute_pe(i):
+    #         selector = self.gen_ij_selector(i=i, n=n, h=crit_h)
+    #         model = OLS(ys.iloc[selector], xs.iloc[selector]).fit()
+    #         return model.predict(xs.iloc[i]).iloc[0]
+
+
+
+    #     try:
+    #         # pe_lst = Parallel(n_jobs=len(p_cores))(delayed(compute_pe)(i) for i in n)
+    #                 # # Set the environment variable to restrict joblib to use only P cores
+    #         original_affinity = psutil.Process().cpu_affinity()
+    #         p_cores = [core for core in original_affinity if core < 12]  # Assuming P-cores are even-numbered
+    #         psutil.Process().cpu_affinity(p_cores)
+    #         pe_lst = Parallel(n_jobs=len(p_cores))(delayed(compute_pe)(i) for i in n)
+    #         for i in n:
+    #             compute_pe(i)
+    #     except Exception as e:
+    #         print(e)
+    #     finally:
+    #     #     # Restore the original CPU affinity
+    #         psutil.Process().cpu_affinity(original_affinity)
+        
+    #     pe_mean = np.mean(pe_lst)
+        
+    #     if verbose: print(pe_mean, pe_lst)
+        
+    #     return pe_mean
         
 
 
@@ -241,7 +246,7 @@ class CV_h_block:
                 mse, df_mse = self.compute_prediction_error(pq_order=pq_order, verbose=verbose)
             else :
                 mse = self.compute_prediction_error(pq_order=pq_order, verbose=verbose)
-            if verbose : print(pq_order, mse)
+            print(pq_order, mse)
             pe_res.append([pq_order, mse])
         
         self.df_pe_res = pd.DataFrame(pe_res, columns=['pq_order', 'CV'])

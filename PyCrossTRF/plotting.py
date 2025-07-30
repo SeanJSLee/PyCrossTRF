@@ -125,6 +125,7 @@ class Plot():
             ax.axhline(y=0, color='k', lw=0.5)  # Vertical y=0
         # 
         ax.set_ylim(ymin = ymin, ymax=ymax)
+        ax.set_xlim(0.04, 0.96)
         ax.legend()
         plt.ylabel(y_label)
         plt.xlabel(x_scale.name)
