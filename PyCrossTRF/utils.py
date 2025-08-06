@@ -1,15 +1,21 @@
 import pandas as pd
 import numpy as np
+import pickle
+from pathlib import Path
 from itertools import chain
-from patsy import dmatrices
+from patsy import dmatrices # type: ignore
 from statsmodels.api import OLS
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, QuantileTransformer
 from warnings import simplefilter
+from typing import (
+    Optional, List, Dict, Any, Tuple, Iterable, Union, Literal
+)
 from statsmodels.tools.sm_exceptions import ValueWarning
 from pandas.errors import SettingWithCopyWarning
 
 from statsmodels.tsa.seasonal import seasonal_decompose
 
+from PyCrossTRF.cross_trf import CTRF
 
 # import h_block cross validation
 # import h_block_cv
@@ -245,3 +251,111 @@ class Detrending:
         #                   df_agg.drop(columns=[self.dt_var], errors='ignore')],
         #                   axis=1)
         return df_agg.drop(columns=[self.dt_var], errors='ignore')
+    
+
+
+
+
+class Normalizer:
+    def __init__(self, 
+                 ctrf_model:Optional[CTRF] = None
+                 ) -> None:
+        if ctrf_model  :
+            self.df         = ctrf_model.df
+            # self.cross_id   = ctrf_model.cross_id
+            self.transformer_path = ctrf_model.transformer_path
+            self.mmt_r      = ctrf_model.mmt_r
+            self.mmt_s      = ctrf_model.mmt_s
+
+
+    def normalizer( self,
+                    trans_var: str,
+                    method: Literal['raw','minmax','linear','time', 'standard','quantile'],
+                    df : Optional[pd.DataFrame] = None, 
+                    cross_id : Optional[str] = None ,
+                    verbose=False,
+                    )  : 
+        """
+        Normalize the temperature and covariate variables.
+        'cross_id' should provide for proper normalization.
+        """
+        if df is None: df = self.df
+        # 
+        # 
+        def _apply_transform(   method:Literal['minmax','linear','standard','quantile'], 
+                                crossid:Optional[str] = None
+                                ) -> pd.DataFrame : #type: ignore
+            # 
+            # normalization ignoring 'cross_id'
+            if cross_id is None :
+                # 
+                if (method == 'minmax') or (method == 'linear'):
+                    transformer = MinMaxScaler()
+                elif method == 'standard':
+                    transformer = StandardScaler()
+                elif method == 'quantile' :
+                    transformer = QuantileTransformer(
+                                    output_distribution='uniform',
+                                    subsample=None, # type: ignore
+                                    random_state=None)
+                # 
+                transformed = transformer.fit_transform(df[[trans_var]].rename(columns={trans_var:'nogroup'})).ravel()
+                return pd.DataFrame({f'{trans_var}_{method}_transformer':[transformer] * len(df),
+                                         f'{trans_var}_{method}':transformed}, 
+                                         index=df.index) 
+            # 
+            elif cross_id :
+                # 
+                def _transform_minmax(g : pd.DataFrame, method=method, trans_var=trans_var, cross_id=cross_id):
+                    # 
+                    if (method == 'minmax') or (method == 'linear'):
+                        transformer = MinMaxScaler()
+                    elif method == 'standard':
+                        transformer = StandardScaler()
+                    elif method == 'quantile' :
+                        transformer = QuantileTransformer(
+                                        output_distribution='uniform',
+                                        subsample=None, # type: ignore
+                                        random_state=None)
+                    # 
+                    fips = g[cross_id].iloc[0]
+                    transformed = transformer.fit_transform(g[[trans_var]].rename(columns={trans_var:fips},errors='ignore')).ravel() # type: ignore
+                    return pd.DataFrame({f'{trans_var}_{method}_transformer_{cross_id}':[transformer] * len(g), # type: ignore
+                                         f'{trans_var}_{method}':transformed}, 
+                                         index=g.index)
+                # 
+                return df[[trans_var,cross_id]].groupby(cross_id, observed=True, group_keys=False).apply(_transform_minmax)
+        # 
+        # 
+
+        if method == 'raw':
+            xs = df[trans_var]
+
+
+        elif method in(['minmax','linear','standard','quantile']):
+            return _apply_transform(method=method, crossid=cross_id) # type: ignore
+        
+
+        elif method == 'time':
+            # use index
+            scaler = len(x.index)
+            xs = x.index / scaler
+            if verbose :
+                print('time w/o MMT')
+                print(f'min: {x.min()}, max: {x.max()}')
+
+
+        # xs = np.array(xs).flatten()
+        # xs = pd.Series(xs, name=x.name)
+        # return  xs
+    
+
+    def centering(self,
+                  method: Literal['raw','minmax','linear','time','quantile']):
+        '''
+        'centering' is essential process to estimate 'ctrf' model.
+        To properly estiamted, first, run the model and find 'mmt(mmt_s)' then
+            normalize covariates again to them have 'mean 0' at the 'mmt(mmt_s)'. 
+        'temp' variable forced to have [0,1] interval, but covariates are strandardized.
+        '''
+    

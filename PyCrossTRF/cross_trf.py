@@ -1,29 +1,33 @@
+import os
 import pandas as pd
 import numpy as np
-from typing import Any
 # from itertools import chain
 # from patsy import dmatrices
 from statsmodels.api import OLS
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, QuantileTransformer
-from warnings import simplefilter
 from statsmodels.tools.sm_exceptions import ValueWarning
-from pandas.errors import SettingWithCopyWarning
 
+from typing import Dict, Optional, Union, Literal, Tuple, Any
+from warnings import simplefilter
+from pandas.errors import SettingWithCopyWarning
 
 from .utils import ctrf_utils
 
-simplefilter('ignore', ValueWarning)
-simplefilter(action="ignore", category=SettingWithCopyWarning)
+# simplefilter('ignore', ValueWarning)
+# simplefilter(action="ignore", category=SettingWithCopyWarning)
 
 class CTRF:
-    def __init__(self, df: pd.DataFrame, 
-                 dep: str, 
-                 temp_r: str, 
-                 pq_order: dict, 
-                 cov_scale: dict, 
-                 std_interval: int = 1000,
-                 time_id = 'date',
-                 cross_id = 'fips'
+    def __init__(self, 
+                df          : pd.DataFrame, 
+                dep         : str, 
+                temp_r      : str,
+                covariates  : Optional[list[str]] = [], 
+                pq_order    : Dict[str,int] = {'p':4, 'q':2}, 
+                scale       : Dict[str,str] = {'temp_q':'raw'}, 
+                std_interval: int = 1000,
+                time_id     : str = 'date',
+                cross_id    : str = 'fips',
+                transformer_path : str = r'/transformers'
                  ):
         """
         Initialize the Ctrf class.
@@ -37,34 +41,45 @@ class CTRF:
         - t_interval (int): Number of prediction points.
         - kwargs: Additional arguments.
         """
-        self.y : pd.Series  = df[dep].copy()            # pd.Series
-        self.r : pd.Series  = df[temp_r].copy()         #   same
+        # 
+        if not covariates:
+            self.model:Literal['trf','ctrf'] = 'trf'
+        else :
+            self.model:Literal['trf','ctrf'] = 'ctrf'
+        # 
+        self.df = df
+        self.y : pd.Series  = df[dep]            # pd.Series
+        self.r : pd.Series  = df[temp_r]         #   same
         self.x_raw  = {}
-        for cov_x in [cov for cov in cov_scale.keys() if cov != self.r.name] :
-            self.x_raw[f'{cov_x}'] = df[cov_x].copy()
-        self.time_id= time_id        # date variable
-        self.cross_id = cross_id            # id variable (cross sectional id)
-
-        self.pq_order = pq_order
-        self.cov_scale = cov_scale
+        # if self.model == 'ctrf':
+        self.covariates = covariates
+        for cov in covariates : # pyright: ignore[reportOptionalIterable]
+            self.x_raw[f'{cov}'] = df[cov]
+        self.time_id    = time_id        # date variable
+        self.cross_id   = cross_id            # id variable (cross sectional id)
+        self.pq_order   = pq_order
+        self.scale      = scale
         self.std_interval = std_interval
-        
-
-        self.s = pd.Series()        # normalizaed temperature
-        self.s_pred = pd.Series()     # temp range to recover TRF and CTRFs
+        # CTRF need normalization, it use 'scikitlearn' normalizers in '/transformers' folder
+        if not os.path.exists(transformer_path):
+            os.makedirs(transformer_path)
+        self.transformer_path = transformer_path            
+        # 
+        # reserved object to organize
+        self.s = pd.Series()            # normalizaed temperature
+        self.s_pred = pd.Series()       # temp range to recover TRF and CTRFs
         self.x_s = {}
-
-        self.Xs = pd.DataFrame()            # p,q powered temp
-        self.Xs_ctrf = pd.DataFrame()       # p,q powered temp and covariates
-        
+        # 
+        self.Xs = pd.DataFrame()        # p,q powered temp
+        self.Xs_ctrf = pd.DataFrame()   # p,q powered temp and covariates
         # date
         self.X_date = pd.DataFrame()
         
-        self.mmt_r : float = None           
-        self.MMT_s : float = None                   # MMT in the way of normlized as normalization method.
+        self.mmt_r : Optional[float] = None           
+        self.mmt_s : Optional[float] = None            # MMT in the way of normlized as normalization method.
         
-        self.reg_res_trf = {}              #               CTRF
-        self.reg_res_ctrf = {}              #               CTRF
+        self.reg_res_trf = {}           #  TRF regression result
+        self.reg_res_ctrf = {}          # CTRF regression result
 
         self.Xs_pred = pd.DataFrame()   # p,q powered temp based on 'self.temp_pred' and p, q order
         self.Xs_ctrf_pred = pd.DataFrame()  #       the same for CTRF.
@@ -72,102 +87,112 @@ class CTRF:
         
         self.recovered_trf = pd.DataFrame()
         self.recovered_ctrf = pd.DataFrame()
+        print(f'''
+{self.model.upper()} model initiated with:
+* Dep var: {dep}
+* Temp var: {temp_r}, normalization: {scale[temp_r]}
+            ''')
 
 
 
 
-    def pre_processing(self, prep_for:str = {'trf','ctrf'}, verbose=False):
-        if prep_for == 'trf':
-            # estimation variable, normalization etc.
-            self.s = ctrf_utils().normalizer(x = self.r, 
-                                             method = self.cov_scale[self.r.name]['scale'])
-            
-            self.Xs = ctrf_utils().gen_df_xs(temp_s=self.s, pq_order=self.pq_order)
-            # 
-            # gen data for recover TRF and MMT.
-            self.s_pred     = pd.Series(np.arange(0, 1, 1/self.std_interval), name=self.r.name)
-            self.Xs_pred    = ctrf_utils().pq_powering(temp_s=self.s_pred, pq_order=self.pq_order)
-            # 
-            if verbose : print('self.xs \n',self.s, '\nself.Xs_pred \n', self.Xs_pred)
 
-        elif prep_for == 'ctrf':
-            # construct ctrf dataframe
+    def preprocess( self, 
+                   model:Optional[Literal['trf', 'ctrf']],
+                   verbose=False
+                            ):
+        # estimation variable, normalization etc.
+        # generate normalized series of temperature by variable scale type.
+        self.s:pd.Series = ctrf_utils().normalizer(
+                                        x = self.r, 
+                                        method = self.scale[self.r.name]  # pyright: ignore
+                                        )
+        # construct regressors based on 'order' specification
+        self.Xs:pd.DataFrame = ctrf_utils().gen_df_xs(
+                                        temp_s = self.s, 
+                                        pq_order = self.pq_order)
+        # 
+        # gen data for recover TRF and MMT.
+        self.s_pred:pd.Series     = pd.Series(np.arange(0, 1, 1/self.std_interval), name = self.r.name)
+        self.Xs_pred:pd.DataFrame = ctrf_utils().pq_powering(temp_s=self.s_pred, pq_order = self.pq_order)
+        # 
+        if verbose : print('self.xs \n',self.s, '\nself.Xs_pred \n', self.Xs_pred)
+        if self.model == 'trf' or model == 'trf':
+            return self.Xs
+        # 
+        elif self.model == 'ctrf' or model == 'ctrf':
             self.Xs_ctrf = self.Xs
             # adding normalizaed variable for ctrf
-            for cov_x in self.x_raw.keys() :
+            for cov in self.covariates :  # pyright: ignore[reportOptionalIterable]
                 # normalization
-                self.x_s[f'{cov_x}'] = ctrf_utils().normalizer(
-                                                    x=self.x_raw[cov_x], 
-                                                    method=self.cov_scale[cov_x]['scale'],
+                self.x_s[f'{cov}'] = ctrf_utils().normalizer(
+                                                    x=self.x_raw[cov], 
+                                                    method=self.scale[cov],  # type: ignore
                                                     temp= self.s,
-                                                    MMT=self.MMT_s
+                                                    MMT=self.mmt_s
                                                 )
                 # gen variable with the pq powered the temp var.
                 self.Xs_ctrf = pd.concat([  self.Xs_ctrf,
                                             ctrf_utils().pq_powering(   
                                                 temp_s= self.s, 
                                                 pq_order= self.pq_order, 
-                                                covariate_s= self.x_s[f'{cov_x}']
-                                            )
-                                        ],
+                                                covariate_s= self.x_s[f'{cov}'] )
+                                            ],
                                             axis=1
                                         )
             #
             if verbose : print(self.Xs_ctrf)
-
-        if verbose : print(f'pre-processing done - {prep_for}')
+            return self.Xs_ctrf
 
 
 
     
     def estimate_trf(self, verbose=False):
         # prep for estimation
-        self.pre_processing(prep_for='trf', verbose=verbose)
-
-        # ys = self.df[[self.y]]
-        
-        # self.xs = ctrf_utils().gen_df_xs(temp_s=self.temp_s, pq_order=self.order)
+        self.preprocess(model = 'trf', verbose=verbose)
         # 
         # Run OLS
-        self.reg_res_trf = OLS(self.y,self.Xs).fit()
+        self.reg_res_trf = OLS(self.y,
+                               self.Xs).fit()
         # 
         # generate prediction table.
         # 
-        self.Xs_pred = ctrf_utils().pq_powering(temp_s=self.s_pred, pq_order=self.pq_order)
+        self.Xs_pred = ctrf_utils().pq_powering(temp_s = self.s_pred, 
+                                                pq_order = self.pq_order)
         # 
         if verbose : print (self.Xs_pred)
         # 
         # find MMT
         self.recovered_trf = self.reg_res_trf.predict(self.Xs_pred)
         # update MMT
-        self.MMT_s = np.argmin(self.recovered_trf) / self.std_interval    # need to use saved scale to recover it
-        if verbose : print(f'MMT: {self.MMT_s} \n',self.reg_res_trf.summary())
+        self.mmt_s = np.argmin(self.recovered_trf) / self.std_interval    # need to use saved scale to recover it
+        if verbose : print(f'MMT: {self.mmt_s} \n',self.reg_res_trf.summary())
 
 
 
 
     def estimate_ctrf(self, verbose=False):
         # estimate trf first to find MMT.
-        if self.MMT_s is None :
+        if self.mmt_s is None :
             if verbose: print('TRF re-estimate')
             self.estimate_trf()
-        
-        self.pre_processing(prep_for='ctrf', verbose=verbose)
-
+        self.preprocess(model='ctrf',verbose=verbose)
         # run OLS
         # save ols result
         self.reg_res_ctrf = OLS(self.y, self.Xs_ctrf).fit()
         # 
         # update MMT in ctrf
-        self.recovered_ctrf = CTRF_recover().recover_ctrf(ctrf_pred_lst=[],
-                                    s_pred=self.s_pred,
-                                    coef=self.reg_res_ctrf.params,
-                                    pq_order=self.pq_order,
-                                    verbose=False)
+        self.recovered_ctrf = CTRF_recover().recover_ctrf(
+                                    ctrf_pred_lst=[],
+                                    s_pred  = self.s_pred,
+                                    coef    = self.reg_res_ctrf.params,
+                                    pq_order= self.pq_order,
+                                    verbose = False
+                                    )
         # print(self.recovered_ctrf)
         # self.recovered_ctrf
-        self.MMT_s = np.argmin(self.recovered_ctrf['base']) / self.std_interval
-
+        self.mmt_s = np.argmin(self.recovered_ctrf['base']) / self.std_interval
+        # 
         if verbose : print(self.reg_res_ctrf.summary(), '\n', self.reg_res_ctrf.params)
         #
 
@@ -181,9 +206,11 @@ class CTRF_recover :
         pass
 
 
-
-
-    def recover_ctrf(  self, ctrf_pred_lst : list, s_pred : pd.Series, coef : pd.Series, pq_order : dict, verbose=False ):
+    def recover_ctrf(  self, 
+                     ctrf_pred_lst : list, 
+                     s_pred : pd.Series, 
+                     coef : pd.Series, 
+                     pq_order : dict, verbose=False ):
         '''
         generate list of dict that contatining information to recover CTRF
         ctrf_pred_lst = [{'time':[.5, 1.0]},{'income':[-1.0, 0.0, 3.0]},{'age':[-2.0, 1.0, 3.0]}]
@@ -208,9 +235,6 @@ class CTRF_recover :
 
         return ctrf
             
-            
-
-
 
 
     def calc_ctrf(  self, s_pred : pd.Series, coef : pd.Series, pq_order:dict, cov:str = None, muliple:float = 1.0):
@@ -231,58 +255,3 @@ class CTRF_recover :
 
         return ctrf_recov
                 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
