@@ -1,30 +1,47 @@
 import pandas as pd
 import numpy as np
 
-
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import LightSource
 
+from statsmodels.api import OLS
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, QuantileTransformer
+from statsmodels.tools.sm_exceptions import ValueWarning
+from statsmodels.regression.linear_model import RegressionResultsWrapper
+
+
+from typing import Dict, Optional, Union, Literal, Tuple, Any
+
 from itertools import cycle
 
 
-from .cross_trf import *
+# from .cross_trf import *
+from .cross_trf import CTRF, recover_ctrf, calc_ctrf
 
 
 class Plot():
-    def __init__(self, df, ctrf_res, var_id:str='fips', var_date:str='date'):
-        self.df = df
-        self.ctrf_res = ctrf_res
-        self.var_id = var_id
-        self.var_date = var_date
-        self.mmt_s = ctrf_res.MMT_s
+    def __init__(self, model:CTRF):
+        self.model      = model
+        self.df         = model.df
+        self.cross_id   = model.cross_id
+        self.time_id    = model.time_id
+        self.mmt_s      = model.mmt_s
+        self.model      = model.model
+        self.reg_res:RegressionResultsWrapper = model.reg_res_trf if model.model == 'trf' else model.reg_res_ctrf # type: ignore
+        self.params     = self.reg_res.params
+        self.s_pred     = model.s_pred
+        self.pq_order   = model.pq_order
 
 
-    def residual(self, resid_mean_only = False, additonal_scatter_fips:list = [('12057','Hillsborough County, FL', 'r')]):
+
+    def residual(self, 
+                 resid_mean_only = False, 
+                 additonal_scatter_fips:list = [('12057','Hillsborough County, FL', 'r')]
+                 ):
         # Residual dataframe gen from 'ctrf_result'
-        df_resid = self.df[[self.var_id, self.var_date]].copy()
-        df_resid['resid'] = np.array(self.ctrf_res.reg_res_ctrf.resid)
+        df_resid = self.df[[self.cross_id, self.time_id]].copy()
+        df_resid['resid'] = np.array(self.reg_res.resid)
         df_resid_mean = df_resid[['date','resid']].groupby('date').agg('mean').reset_index()
         if resid_mean_only:
             return df_resid_mean
@@ -32,10 +49,10 @@ class Plot():
         fig, ax = plt.subplots(figsize=(12,8))
         ax.scatter(df_resid['date'], df_resid['resid'], 
                    s=0.2, alpha= 0.5, c='b',
-                   label=f'{self.ctrf_res.y.name}')
+                   label=f'{self.reg_res.y.name}')
         ax.plot(df_resid_mean['date'],df_resid_mean['resid'], 
                 lw=3, alpha=1, c='k',
-                label=f'{self.ctrf_res.y.name} mean')
+                label=f'{self.reg_res.y.name} mean')
         if len(additonal_scatter_fips) > 0 :
             for fips in additonal_scatter_fips :
                 df_i = df_resid.loc[df_resid['fips']==fips[0]]
@@ -43,17 +60,16 @@ class Plot():
                            df_i['resid'],
                     s=2, alpha= 1,c=fips[2], label=f'FIPS: {fips[0]}, {fips[1]}')
         ax.legend()
-        plt.ylabel(f'Residual plot - {self.ctrf_res.y.name}')
+        plt.ylabel(f'Residual plot - {self.reg_res.y.name}')
         plt.xlabel('Date')
         plt.show()
 
 
     def plot_recover_trf(self, ctrf = []):
-        base_trf = (CTRF_recover()
-                        .recover_ctrf( ctrf, 
-                            self.ctrf_res.s_pred, 
-                            self.ctrf_res.reg_res_ctrf.params, 
-                            self.ctrf_res.pq_order, 
+        base_trf = (recover_ctrf( ctrf, 
+                            self.s_pred, 
+                            self.params, 
+                            self.pq_order, 
                             verbose=False)
                     )
         return base_trf 
@@ -65,7 +81,7 @@ class Plot():
     def ctrf_plot(  self, 
                     x_scale = pd.DataFrame(np.arange(0,1,0.001), columns=['quantile'])['quantile'], 
                     label   = 'base TRF',
-                    y_label = 'Averaged daily deaths per 100k', 
+                    y_label = 'Deaths per 100k in 30 days (ln)', 
                     # x_label = f'Temperature {quantile}',
                     color = 'k',
                     ymin = None,
@@ -84,12 +100,12 @@ class Plot():
         colors = cycle(['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'])
         # 
         # MMT
-        mmt_s = self.mmt_s
+        MMT_s = self.mmt_s
         # 
         # scale
         x_scale_10th = x_scale.loc[int(len(x_scale)*0.1)]
         x_scale_90th = x_scale.loc[int(len(x_scale)*0.9)]
-        mmt_r = x_scale.loc[int(mmt_s * len(x_scale))]
+        mmt_r = x_scale.loc[int(MMT_s * len(x_scale))]
         # print(x_scale_10th, x_scale_90th, mmt_r)
 
         # figure
@@ -112,7 +128,7 @@ class Plot():
         # dotting mmt
         if ctrf_base_comb :
             coord_mmt_x = mmt_r
-            coord_mmt_y = df['base'].loc[int(mmt_s * len(x_scale))]
+            coord_mmt_y = df['base'].loc[int(MMT_s * len(x_scale))]
             ax.plot(coord_mmt_x, coord_mmt_y, 'ro')
             ax.axvline(x=coord_mmt_x, color='gray', lw=0.5,linestyle='--')  # Vertical line to x-axis
             ax.axhline(y=coord_mmt_y, color='gray', lw=0.5,linestyle='--')  # Horizontal line to y-axis
@@ -151,7 +167,7 @@ class Plot():
 #         df = pd.DataFrame()
 #         # 
 #         for z_val in z_vec :
-#             arry = (ctrf.CTRF_recover().recover_ctrf([ 
+#             arry = (ctrf..recover_ctrf([ 
 #                                 {var:[z_val]}], 
 #                                 model.s_pred, 
 #                                 model.reg_res_ctrf.params, 

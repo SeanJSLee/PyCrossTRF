@@ -4,7 +4,8 @@ from statsmodels.api import OLS
 from warnings import simplefilter
 from statsmodels.tools.sm_exceptions import ValueWarning
 from pandas.errors import SettingWithCopyWarning
-from .utils import ctrf_utils
+
+from .utils import pq_powering, gen_df_xs
 from .cross_trf import CTRF
 
 from joblib import Parallel, delayed
@@ -28,14 +29,15 @@ class CV_h_block:
     Cross-validation using h-block method to report Prediction Error (PE) over different p and q orders.
     """
     def __init__(self, 
-                    df: pd.DataFrame,                  
-                    dep: str, 
-                    temp_r: str, 
-                    pq_order_max: dict, 
-                    time_id:str = '', 
-                    cross_id:str= '', 
-                    cov_scale:dict = {},
-                    ctrf_model = None,
+                 model : CTRF,
+                    # df: pd.DataFrame,                  
+                    # dep: str, 
+                    # temp_r: str, 
+                    # pq_order_max: dict, 
+                    # time_id:str = '', 
+                    # cross_id:str= '', 
+                    # cov_scale:dict = {},
+                    # ctrf_model = None,
                     ):
         """
         Initialize the CV_h_block class with the dataset and parameters.
@@ -45,6 +47,7 @@ class CV_h_block:
         :param indep: Name of the independent variable.
         :param pq_order: Dictionary specifying the maximum order of p and q.
         """
+
         self.time_id = time_id
         if time_id == '' :
             df[time_id] = df.index
