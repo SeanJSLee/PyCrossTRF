@@ -8,12 +8,7 @@ PyCrossTRF implements cross‑sectional transfer‑function (TRF) and covariate�
 - **Sieve bootstrap** – `SieveBootstrap` generates residual‑based confidence bands via AR‑sieve resampling
 - **Visualization utilities** – `plotting.Plot` overlays TRFs/CTRFs and diagnostics for publication‑quality figures
 
-## Installation
-```bash
-pip install PyCrossTRF        # from PyPI (if available)
-# or install locally
-pip install -e .
-```
+
 
 ## Quick Start
 
@@ -77,8 +72,13 @@ ctrf.plotting.Plot(ub).trf_plot()  # overlay bounds
 - **CTRF curves** – shifts in the response curve under different covariate values illustrate heterogeneous effects.
 - **Bootstrap bands** – 2.5%/97.5% envelopes for policy‑relevant uncertainty assessment.
 
-## Citation
-If you use this package, please cite Chang et al. (2016) and this repository.
+## Citation Suggestion
+Lee, Jaeseok Sean. 2025. “PyCrossTRF: Semi-parametric cTRF estimation model”. https://github.com/SeanJSLee/PyCrossTRF.
+
+## Reference
+Chang, Yoosoon, Chang Sik Kim, J. Isaac Miller, Joon Y. Park, and Sungkeun Park. 2016. "A new approach to modeling the effects of temperature fluctuations on monthly electricity
+demand." Energy Economics 60:206-216
+
 
 ## License
 MIT © 2024 Jaeseok Sean Lee
