@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 .env
 .vscode/
+PyCrossTRF/cross_trf copy.py
+PyCrossTRF/plotting copy.py
