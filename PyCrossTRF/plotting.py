@@ -2,8 +2,10 @@ import pandas as pd
 import numpy as np
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 from matplotlib import cm
 from matplotlib.colors import LightSource
+from matplotlib.axes import Axes
 
 from statsmodels.api import OLS
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, QuantileTransformer
@@ -18,6 +20,7 @@ from itertools import cycle
 
 # from .cross_trf import *
 from .cross_trf import CTRF, recover_ctrf, calc_ctrf
+from .sieve_bs import SieveBootstrap
 
 
 class Plot():
@@ -27,7 +30,7 @@ class Plot():
         self.cross_id   = model.cross_id
         self.time_id    = model.time_id
         self.mmt_s      = model.mmt_s
-        self.model      = model.model
+        # self.model      = model.model
         self.reg_res:RegressionResultsWrapper = model.reg_res_trf if model.model == 'trf' else model.reg_res_ctrf # type: ignore
         self.params     = self.reg_res.params
         self.s_pred     = model.s_pred
@@ -65,12 +68,12 @@ class Plot():
         plt.show()
 
 
-    def plot_recover_trf(self, ctrf = []):
-        base_trf = (recover_ctrf( ctrf, 
-                            self.s_pred, 
-                            self.params, 
-                            self.pq_order, 
-                            verbose=False)
+    def plot_recover_trf(self, ctrf:Optional[list] = None):
+        base_trf = (recover_ctrf( s_pred    = self.s_pred, 
+                                  coef      = self.params, 
+                                  pq_order  = self.pq_order, 
+                                  ctrf_pred_lst = ctrf,
+                                  verbose   = False)
                     )
         return base_trf 
             #     {'base':  0      0.886116
@@ -150,6 +153,53 @@ class Plot():
             plt.savefig(save_fig)
         # 
         plt.show()
+
+
+
+    def trf_plot(self,
+                 ax:Optional[Axes] = None,
+                 df_pred:bool = False,
+                 label_yaxis:Optional[str] = None,  # type: ignore
+                 label_xaxis:Optional[str] = 'Normalized Temp',
+                 **keywarg
+                 ):
+        '''
+        Generate 'TRF model' or 'base TRF of CTRF model' plot.
+        '''
+        # Recover TRF (base TRF) from estimated result.
+        if self.model.model == 'trf':
+            label = 'DRF'
+        else : 
+            label = 'base DRF'
+        if label_yaxis is None: label_yaxis:str = self.model.y.name  # type: ignore
+        # 
+        df_plot = pd.DataFrame(self.plot_recover_trf())
+        trf_var:str = df_plot.columns[0]
+        df_plot['s'] = df_plot.index / len(df_plot.index)
+
+        sns.set(style="white", font="Times New Roman", rc={"font.size": 10})
+        if ax :
+            fig = ax.get_figure()
+        else:
+            fig, ax = plt.subplots(figsize = (10,6))
+        # fig.subplots_adjust(left=0.1, right=0.9)  # type: ignore
+        ax.plot(df_plot['s'], df_plot[trf_var], label=label, **keywarg)
+        if ax is None :
+            # Set the axis labels
+            ax.set_xlabel(label_xaxis) # type: ignore
+            ax.set_ylabel(label_yaxis)
+
+            # Display the legend
+            ax.legend()
+            plt.tight_layout()
+            plt.show()
+        elif ax :
+            return ax
+        elif df_pred :
+            return df_plot
+
+
+
 
 
 

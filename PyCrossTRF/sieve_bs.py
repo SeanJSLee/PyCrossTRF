@@ -6,8 +6,14 @@ from statsmodels.api import OLS
 from sklearn.preprocessing import QuantileTransformer
 from joblib import Parallel, delayed
 import torch
+from typing import Dict, Optional, Union, Literal, Tuple, Any
 
-warnings.filterwarnings(action='ignore',category=UserWarning)
+from statsmodels.regression.linear_model import RegressionResultsWrapper
+
+
+from .cross_trf import CTRF
+
+# warnings.filterwarnings(action='ignore',category=UserWarning)
 
 
 # 
@@ -16,48 +22,52 @@ warnings.filterwarnings(action='ignore',category=UserWarning)
 #   then it returns 2.5 and 97.5 percentiles confidence interval.
 
 class SieveBootstrap:
-    def __init__(self,  CTRF = None, 
-                        df_reg = pd.DataFrame(), 
-                        ctrf:str = 'base',
-                        B:int=999,
-                        maxL:int = 24,
-                        device='cuda',
-                        multiprocessing : {None, 'cpu', 'gpu'} = None,
+    def __init__(self,  model : CTRF         , 
+                        # df_reg              = pd.DataFrame(), 
+                        # ctrf:str            = 'base',
+                        maxL : int  = 24,
+                        B : int               =999,
+                        device : Literal['cpu','cuda'] = 'cuda',
+                        multiprocessing : Literal[None, 'cpu', 'gpu'] = 'gpu',
                         ):
         """
         Initialize the SieveBootstrap class.
         Parameter(s):
             CTRF: CTRF model object from CTRF class.
         """
-        self.df_reg     = df_reg
-        self.CTRF       = CTRF              # CTRF model object from CTRF class
-        self.ctrf       = ctrf              # CTRF model name
-        self.B          = B                 # number of bootstrap samples
+        self.dep : str      = model.y.name      #type:ignore
+        self.indep : str    = model.r.name      #type:ignore
+        self.time_id : str  = model.time_id
+        self.cross_id : str = model.cross_id
+        self.df         = model.df[[self.dep, self.indep, self.time_id, self.cross_id]].copy()
+        self.CTRF : CTRF    = model              # CTRF model object from CTRF class
+        # self.ctrf       = ctrf              # CTRF model name
+        self.B              = B                 # number of bootstrap samples
         # 
-        self.maxL   = maxL                  # maximum lag for AR process
-        self.maxT   = 0                     # maximum time point initialization
-        self.lscross_ids = df_reg[self.CTRF.var_id].unique() # list of cross-sectional id
+        self.maxL :int      = maxL                  # maximum lag for AR process
+        self.maxT :int      = 0                     # maximum time point initialization
+        self.lscross_ids:list = list(model.df[model.cross_id].unique().copy()) # list of cross-sectional id
 
         # regression results - TRF or CTRF
-        if self.CTRF.reg_res_ctrf == {} :
-            self.CTRF_reg_res = CTRF.reg_res_trf
+        if model.model == 'trf' :
+            self.CTRF_reg_res : RegressionResultsWrapper = model.reg_res_trf  # type: ignore
             # p,q powered normalized temperature
-            self.CTRF_df_Xs      = CTRF.Xs.copy()
-        else :
-            self.CTRF_reg_res = CTRF.reg_res_ctrf
-            self.CTRF_df_Xs      = CTRF.Xs_ctrf.copy()
+            self.CTRF_df_Xs      = model.Xs.copy()
+        elif model.model == 'ctrf' :
+            self.CTRF_reg_res : RegressionResultsWrapper = model.reg_res_ctrf    # type: ignore
+            self.CTRF_df_Xs   = model.Xs_ctrf.copy()
         # 
         # assign time index
         self._assign_time_index()
-        self.maxT = self.df_reg['T'].max()  # maximum time point update
+        self.maxT = self.df['T'].max()  # maximum time point update
         # generate y_hat 
-        self.df_reg['y_hat'] = self.CTRF_reg_res.predict()
+        self.df['y_hat'] = self.CTRF_reg_res.predict()
         # generate fitted resiual of the CTRF model (eta_hat).
-        self.df_reg['eta_hat'] = self.CTRF_reg_res.resid
+        self.df['eta_hat'] = self.CTRF_reg_res.resid
         #
-        self.cross_id_col :str = self.CTRF.var_id
-        self.date_col  :str = self.CTRF.var_date
-        self.dependent_var   :str = self.CTRF.reg_res_trf.model.endog_names
+        # self.cross_id_col :str = self.CTRF.var_id
+        # self.date_col  :str = self.CTRF.var_date
+        # self.dep   :str = self.CTRF.reg_res_trf.model.endog_names
         # 
         self.df_e_hat = {}
         self.B_df_y_star = {}
@@ -66,9 +76,21 @@ class SieveBootstrap:
         self.device = device
         self.muliprocessing = multiprocessing
 
-    #######################################################################################
-    # main process.
-    #######################################################################################
+
+
+    def run(self):
+        cross_sections:list = list(self.df[self.cross_id].unique())
+        df_bootstrapped = []
+        for fips in cross_sections :
+            df_bootstrapped.append(self.sieve_bootstrap_i(cross_id=fips))
+        df_bootstrapped = pd.concat(df_bootstrapped, axis=0)
+        df_bootstrapped = df_bootstrapped.merge(self.df[[self.cross_id, self.time_id, self.indep]],
+                                                on=[self.cross_id, self.time_id], how='left')
+        return df_bootstrapped
+        
+
+
+
     def sieve_bootstrap_i(self, cross_id:str, 
                           save_results_e_hat:bool = False, ):
         '''
@@ -83,17 +105,18 @@ class SieveBootstrap:
         4. find the 2.5 and 97.5 percentiles of 999 y_star and 1 y_actual.
         '''
         # 1. initialize, get the fitted resiudal
-        dfi = (self.df_reg.loc[self.df_reg[self.cross_id_col] == cross_id][[
-                    self.date_col, self.cross_id_col, self.dependent_var,'y_hat', 'eta_hat', 'T']].copy()
+        dfi = (self.df.loc[self.df[self.cross_id] == cross_id][[
+                    self.time_id, self.cross_id, self.dep,'y_hat', 'eta_hat', 'T']].copy()
                     .sort_values(by='T',ascending=False).reset_index(drop=True))
         #       demeaning eta_hat (CTRF model fitted residual)
         dfi['eta_hat'] = dfi['eta_hat'] - dfi['eta_hat'].mean()
 
         # 2. run AR OLS
-        df_e_hat_i, AR_result_i = self.run_AR_model(dfi, self.dependent_var, self.maxL)
+        df_e_hat_i, AR_result_i = self.run_AR_model(dfi, self.dep, self.maxL)
+        # print(df_e_hat_i)
         #       save results
         if save_results_e_hat:
-            self.df_e_hat[cross_id] = df_e_hat_i
+            self.df_e_hat[cross_id]         = df_e_hat_i
             self.AR_model_results[cross_id] = AR_result_i
 
 
@@ -102,11 +125,12 @@ class SieveBootstrap:
             # drop consumed lags by AR model.
             dfi = dfi.loc[dfi['T'] >= self.maxL]
             df_y_star_B = self.bootstrap_e_star_torch_gpu(dfi, df_e_hat_i, cross_id)
+
         else :
             # initialize bootstrapped results.
             df_y_star_B = {}
             # 'y_star_0' reserved for the actual y.
-            df_y_star_B[0] = dfi[['T',self.dependent_var]].rename(columns={self.dependent_var:'y_star_0'})
+            df_y_star_B[0] = dfi[['T',self.dep]].rename(columns={self.dep:'y_star_0'})
             df_y_star_B[0] = (df_y_star_B[0].sort_values(by='T', ascending=False)
                                             .reset_index(drop=True)
                                             .drop(columns=['T']))
@@ -138,8 +162,12 @@ class SieveBootstrap:
 
 
         # 4. find the 2.5 and 97.5 percentiles of B y_star and 1 y_actual.
-        df_bs_result = dfi[[self.date_col, self.cross_id_col, self.dependent_var,'y_hat','T']]
+        # df_bs_result = dfi[[self.time_id, self.cross_id, self.dep,'y_hat','T']]
+        df_bs_result = dfi[[self.time_id, self.cross_id, 'y_hat','T']]
         if self.muliprocessing == 'gpu':
+            # print(type(df_y_star_B),df_y_star_B)
+            # print(df_y_star_B.dtypes)
+            # print(df_y_star_B['y_star_0'].astype('float32'))
             # Vectorized computation of quantiles for all rows
             tau025_all, tau975_all = self.find_bootstrap_tails_torch_gpu(df_y_star_B)
             # Align df_bs_result to the index of df_y_star_B (since dropna() may have reduced the number of rows)
@@ -159,11 +187,13 @@ class SieveBootstrap:
 
 
 
+
     #######################################################################################
     # Subpprocesses
     #######################################################################################
     # 2. AR model
     def run_AR_model(self, df, depvar:str, maxL:int):
+        # print(df)
         # no constant model because 'eta_hat' will be feed in as demeaned.
         ARspec = f'{depvar} ~ ' + ' + '.join([f'L{lags}' for lags in range(1, maxL + 1)]) + ' - 1'
         # transform the dataframe to wide style for AR model.
@@ -188,7 +218,8 @@ class SieveBootstrap:
         maxL = self.maxL
         # Convert the fitted residuals to a GPU tensor.
         # (df_e_hat_i is assumed to be a DataFrame with a column 'e_hat'.)
-        e_hat = torch.tensor(df_e_hat_i['e_hat'].values, dtype=torch.float32, device=device)
+        # e_hat = torch.tensor(df_e_hat_i['e_hat'].values, dtype=torch.float32, device=device)
+        e_hat = torch.from_numpy(df_e_hat_i['e_hat'].to_numpy()).to(device=device)
         n = e_hat.shape[0]
 
         # Create a batch of B random permutations.
@@ -203,7 +234,9 @@ class SieveBootstrap:
         # T_values = torch.arange(n, device=device, dtype=torch.int32).flip(0) + maxL
 
         # Convert y_hat to GPU tensor.
-        y_hat = torch.tensor(dfi['y_hat'].values, dtype=torch.float32, device=device)
+        # y_hat = torch.tensor(dfi['y_hat'].values, dtype=torch.float32, device=device)
+        y_hat = torch.from_numpy(dfi['y_hat'].to_numpy()).to(device=device)
+
         # Expand y_hat to shape (B, n)
         y_hat_expanded = y_hat.unsqueeze(0).expand(B, n)
         
@@ -218,7 +251,7 @@ class SieveBootstrap:
         # Create a DataFrame: each column corresponds to one bootstrap replicate.
         df_y_star_B = pd.DataFrame(y_star_np.T, columns=[f'y_star_{b}' for b in range(1, B + 1)])
         # If you need to include the actual (observed) y (i.e. b=0), add that column:
-        df_actual = dfi[['T', self.dependent_var]].rename(columns={self.dependent_var: 'y_star_0'})
+        df_actual = dfi[['T', self.dep]].rename(columns={self.dep: 'y_star_0'})
         df_actual = (df_actual.sort_values(by='T', ascending=False)
                                 .reset_index(drop=True)
                                 .drop(columns=['T']))
@@ -226,6 +259,20 @@ class SieveBootstrap:
         
         # Remove any rows that might contain NaN (if needed).
         df_y_star_B = df_y_star_B.dropna(axis=0)
+        # for col in df_y_star_B.columns:
+        #     if not np.issubdtype(df_y_star_B[col].dtype, np.floating):  # type: ignore
+        #         df_y_star_B[col] = df_y_star_B[col].astype('float64')
+        #         # df_y_star_B[col] = pd.to_numeric(df_y_star_B[col], downcast='float64', errors='coerce')
+        for col in df_y_star_B.columns:
+            # First, explicitly check for the pandas nullable float type.
+            # This check is necessary because np.issubdtype doesn't recognize it.
+            if isinstance(df_y_star_B[col].dtype, pd.Float64Dtype):
+                df_y_star_B[col] = df_y_star_B[col].astype('float64')
+            # Then, check for other non-float types (like 'object' or 'int')
+            # as in your original code to ensure they are also converted.
+            elif not np.issubdtype(df_y_star_B[col].dtype, np.floating):
+                df_y_star_B[col] = df_y_star_B[col].astype('float64')
+
         
         # Optionally, save the results.
         self.B_df_y_star[cross_id] = df_y_star_B
@@ -307,7 +354,7 @@ class SieveBootstrap:
 
     # generate y_star_b
     def generate_y_star_b(self, df_eta_star_ib, fips):
-        _df = self.df_reg[['fips','T','y_hat']].loc[self.df_reg[self.CTRF.var_id] == fips].copy()
+        _df = self.df[['fips','T','y_hat']].loc[self.df[self.CTRF.var_id] == fips].copy()
         _df['eta_star'] = _df.merge(df_eta_star_ib, on='T', how='inner')['eta_star']
         _df = _df.dropna()
         _df['y_star'] = _df['y_hat'] + _df['eta_star']
@@ -352,8 +399,9 @@ class SieveBootstrap:
             Arrays of quantile values for each row.
         """
         # Convert the entire DataFrame to a tensor
-        tensor_y = torch.tensor(df_y_star_B.values, dtype=torch.float32)
-        tensor_y = tensor_y.to(self.device)
+        # tensor_y = torch.tensor(df_y_star_B.values, dtype=torch.float32)
+        # tensor_y = tensor_y.to(self.device)
+        tensor_y = torch.from_numpy(df_y_star_B.to_numpy()).to(self.device)
 
         # Compute quantiles along the column dimension (dim=1)
         tau025 = torch.quantile(tensor_y, 0.025, dim=1)
@@ -383,43 +431,51 @@ class SieveBootstrap:
 
     # assign T to the dataframe
     def _assign_time_index(self):
-        df_T = self.df_reg[['date']].drop_duplicates().copy()
-        df_T['T'] = (df_T['date'].rank() -1).astype(int)
-        self.df_reg['T'] = self.df_reg.drop(columns='T', errors='ignore').merge(df_T, on='date', how='left')['T'] 
+        df_T = self.df[[self.CTRF.time_id]].drop_duplicates().copy()
+        df_T['T'] = (df_T[self.CTRF.time_id].rank() -1).astype(int)
+        self.df['T'] = self.df.drop(columns='T', errors='ignore').merge(df_T, on=self.CTRF.time_id, how='left')['T'] 
 
 
     
 
     # transform TS style df to wide style df to estimate AR model.
     # demeaning the feeded df (it may redundant but it is not hearting.)
-    def _transform_to_wide(self, df_ts_style, var_to_tr:str = 'eta_hat'):
+    def _transform_to_wide(self, df_ts_style, var_to_tr:str = 'eta_hat') -> pd.DataFrame:
         # 
         maxL, maxT = self.maxL, self.maxT
         colnames = [f'L{L}' for L in range(1, maxL + 1)]
         # 
-        _df = df_ts_style.reset_index(drop=True)
-        _var = var_to_tr
+        # _df = df_ts_style.reset_index(drop=True)
+        df = df_ts_style
+        # var_to_tr = var_to_tr
         # 
         # demeaning
-        _df[_var] = _df[_var] - _df[_var].mean()
+        df[var_to_tr] = df[var_to_tr] - df[var_to_tr].mean()
         # 
-        df_wide_style = None
+        df_wide_style = []
         for T in range(0 + maxL, maxT + 1)[::-1]:
-            # Subset _df_eta with a specific id and time
-            _df_t = _df.loc[(_df['T'] == T)]
+            # Subset df_eta with a specific id and time
+            df_t = df.loc[(df['T'] == T)]
             # Generate each row of lags
-            _df_eta_ctrf_L = (
-                            _df.loc[_df['T'].isin(range(T - maxL, T))][[_var]]
-                                .set_index(np.array(colnames)).T
-                            )
-            _df_eta_ctrf_L.set_index(_df_t.index, inplace=True)
-            _df_t = pd.concat([_df_t, _df_eta_ctrf_L], axis=1)
+            # time index to grab - from T and until T-maxL
+            grabTs = range(T - maxL, T)
+            # print(T, grabTs)
+            # print(df.loc[df['T'].isin(grabTs)][[var_to_tr]])
+            df_transposed_lagged = ( df.loc[df['T'].isin(grabTs)][[var_to_tr]]
+                                .set_index(np.array(colnames))
+                        ).T
+            # print('here')
+            df_transposed_lagged.set_index(df_t.index, inplace=True)
+            # df_t = pd.concat([df_t, df_transposed_lagged], axis=1)
+            df_wide_style.append(df_transposed_lagged)
             # 
-            if T == maxT:
-                df_wide_style = _df_t
-            else:
-                df_wide_style = pd.concat([df_wide_style, _df_t], axis=0)
-        return df_wide_style
+            # if T == maxT:
+            #     df_wide_style = df_t
+            # else:
+            #     df_wide_style = pd.concat([df_wide_style, df_t], axis=0)
+        df_wide_style = pd.concat(df_wide_style, axis=0)
+        df_wide_style = pd.concat([df, df_wide_style], axis=1)
+        return df_wide_style.dropna()
 
 
 
