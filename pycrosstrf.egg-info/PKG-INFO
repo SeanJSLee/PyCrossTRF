@@ -1,0 +1,106 @@
+Metadata-Version: 2.2
+Name: pycrosstrf
+Version: 0.1.0
+Summary: Python 3 package for Cross TRF function estimation
+Home-page: https://github.com/SeanJSLee/PyCrossTRF
+Author: Jaeseok Sean Lee
+Author-email: seanjslee@gmail.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-python
+Dynamic: summary
+
+# PyCrossTRF
+
+PyCrossTRF implements cross‑sectional transfer‑function (TRF) and covariate‑augmented transfer‑function (CTRF) models for analyzing how outcomes (e.g., mortality, yields) respond to temperature across many regions. The package follows the approach of Chang et al. (2016) and is designed for applied economists working with panel climate–impact data.
+
+## Key Features
+- **TRF/CTRF estimation** – CTRF builds polynomial–Fourier bases and fits OLS to recover the response curve and the minimum mortality temperature (MMT)
+- **Covariate handling** – covariates are centered/standardized and interact with temperature to produce CTRFs
+- **Sieve bootstrap** – `SieveBootstrap` generates residual‑based confidence bands via AR‑sieve resampling
+- **Visualization utilities** – `plotting.Plot` overlays TRFs/CTRFs and diagnostics for publication‑quality figures
+
+
+
+## Quick Start
+
+### 1. Prepare data
+Your DataFrame must include:
+
+| Column        | Description |
+|---------------|-------------|
+| dep           | dependent variable (e.g., log mortality) |
+| temp_q        | temperature regressor |
+| date          | time index |
+| fips          | cross‑sectional identifier |
+| other covariates | optional (e.g., trends, demographics) |
+
+### 2. Fit a TRF
+```python
+import PyCrossTRF as ctrf
+
+pq = {'p': 4, 'q': 2}  # polynomial/Fourier orders
+model = ctrf.CTRF(df=df,
+                  dep='ln_mortality',
+                  temp_r='temp_q',
+                  covariates=[],
+                  pq_order=pq,
+                  scale={'temp_q': 'raw'})   # normalization rule
+model.estimate_trf()
+ctrf.plotting.Plot(model).trf_plot()
+```
+
+### 3. Add Covariates (CTRF)
+```python
+model = ctrf.CTRF(df=df,
+                  dep='ln_mortality',
+                  temp_r='temp_q',
+                  covariates=['time_trend'],
+                  pq_order=pq,
+                  scale={'temp_q': 'raw', 'time_trend': 'linear'})
+model.estimate_ctrf()
+ctrf.plotting.Plot(model).ctrf_plot()
+```
+
+### 4. Bootstrap Confidence Bands
+```python
+bs  = ctrf.SieveBootstrap(model, maxL=24, B=999)
+boot = bs.run()
+
+lb = ctrf.CTRF(df=boot, dep='y_star_tau025', temp_r='temp_q',
+               covariates=[], pq_order=pq, scale={'temp_q':'raw'})
+lb.estimate_trf()
+
+ub = ctrf.CTRF(df=boot, dep='y_star_tau975', temp_r='temp_q',
+               covariates=[], pq_order=pq, scale={'temp_q':'raw'})
+ub.estimate_trf()
+
+ctrf.plotting.Plot(ub).trf_plot()  # overlay bounds
+```
+
+## Interpreting Results
+- **TRF curve** – shows expected outcome for each normalized temperature quantile.
+- **MMT** – the temperature quantile minimizing the outcome is calculated automatically.
+- **CTRF curves** – shifts in the response curve under different covariate values illustrate heterogeneous effects.
+- **Bootstrap bands** – 2.5%/97.5% envelopes for policy‑relevant uncertainty assessment.
+
+## Citation Suggestion
+Lee, Jaeseok Sean. 2025. “PyCrossTRF: Semi-parametric cTRF estimation model”. https://github.com/SeanJSLee/PyCrossTRF.
+
+## Reference
+Chang, Yoosoon, Chang Sik Kim, J. Isaac Miller, Joon Y. Park, and Sungkeun Park. 2016. "A new approach to modeling the effects of temperature fluctuations on monthly electricity
+demand." Energy Economics 60:206-216
+
+
+## License
+MIT © 2024 Jaeseok Sean Lee

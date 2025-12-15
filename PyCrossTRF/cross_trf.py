@@ -25,6 +25,7 @@ class CTRF:
                 std_interval: int = 1000,
                 time_id     : str = 'date',
                 cross_id    : str = 'fips',
+                disp_info   : bool = True
                  ):
         """
         Initialize the Ctrf class.
@@ -88,11 +89,12 @@ class CTRF:
         
         self.recovered_trf = pd.DataFrame()
         self.recovered_ctrf = pd.DataFrame()
-        print(f'''
-                    {self.model.upper()} model initiated with:
-                    * Dep var: {dep}
-                    * Temp var: {temp_r}, normalization: {scale[temp_r]}
-                                ''')
+        if disp_info :
+            print(f'''
+                        {self.model.upper()} model initiated with:
+                        * Dep var: {dep}
+                        * Temp var: {temp_r}, normalization: {scale[temp_r]}
+                                    ''')
 
 
 
@@ -126,7 +128,8 @@ class CTRF:
             print(self.reg_res_trf.summary())
         # generate prediction table.
         # gen data for recover TRF and MMT.
-        self.s_pred :pd.Series    = pd.Series(np.arange(0, 1, 1/self.std_interval), name = self.r.name)
+        increment = 1/self.std_interval
+        self.s_pred :pd.Series    = pd.Series(np.arange(0, 1 + increment, increment), name = self.r.name)
         self.Xs_pred:pd.DataFrame = pq_powering(temp_s=self.s_pred, pq_order = self.pq_order)
         if verbose : print (self.Xs_pred)
         # 
@@ -196,6 +199,7 @@ class CTRF:
             elif method == 'raw':
                 self.covariates[cov] = cov_label = f'{cov}_{method}' # type: ignore
                 normalized_covariate = df.rename(columns={cov:cov_label}).copy()
+                normalized_covariate = normalized_covariate.astype(float)
                 transformer = pd.DataFrame({f'{cov}_{method}_transformer':['.']*len(self.df)})
             
             elif method == 'standard' :
@@ -280,23 +284,47 @@ def recover_ctrf(   s_pred : pd.Series,
 
 def calc_ctrf( s_pred : pd.Series, 
               coef : pd.Series, 
-              pq_order:dict, cov:Optional[str] = None, 
+              pq_order:dict, 
+              cov:Optional[str] = None, 
               muliple:float = 1.0):
     
     # gen prediction df for ctrf
     # if ctrf is not provided, estimate the baseCTRF.
     if cov is not None or cov == s_pred.name :
+        # generate standardized covariate
         ctrf_pred = pd.Series( [muliple]*len(s_pred.index), name=cov )
     else : ctrf_pred = None
     
     # gen df for recovering ctrf.
+    # if 'ctrf_pred' is not None, 'df' names with covariate's name.
     df = pq_powering(temp_s=s_pred,
                                     pq_order=pq_order,
                                     covariate_s=ctrf_pred) # type: ignore
     
     # recover ctrf based on normalized temp.
+    # for each TRF, it dose not combined with the base TRF.
     ctrf_recov = df.dot(coef[df.columns])
 
     return ctrf_recov
 
 
+
+def calc_ctrf_comb( s_pred : pd.Series, 
+              coef : pd.Series, 
+              pq_order:dict, 
+              covs : dict[str,float] = {'date_lin_raw': 0.5},
+              ) -> Tuple[pd.Series, pd.Series, dict]:
+    base_trf = calc_ctrf(s_pred = s_pred, coef=coef, pq_order=pq_order)
+    ctrf = base_trf
+    # 
+    trfs = {}
+    for cov in covs.keys():
+        trfs[cov] = calc_ctrf(s_pred = s_pred, coef=coef, pq_order=pq_order, 
+                              cov=cov, muliple=covs[cov])
+        ctrf = ctrf + trfs[cov]
+    return ctrf, base_trf, trfs
+
+# calc_ctrf_comb(mod_time_income_age.s_pred, 
+#                mod_time_income_age.reg_res_ctrf.params,
+#                mod_time_income_age.pq_order,
+#                )
